@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	_ "fmt"
 	"io"
+	"math/rand"
 	"os"
 	"testing"
 )
@@ -12,13 +13,15 @@ import (
 func TestLayout(t *testing.T) {
 	file, _ := os.CreateTemp("", "*.dat")
 	filename := file.Name()
-	defer os.Remove(file.Name())
-	defer os.Remove(filename + ".bak")
+	// defer os.Remove(file.Name())
+	// defer os.Remove(filename + ".bak")
 	gian := NewGian(filename)
 	gian.Write([]byte("hello"))
 	gian.ForceCommit()
 	gian.Write([]byte("goodbye"))
 	gian.ForceCommit()
+
+	// messUpFile(filename)
 	dat, err := os.ReadFile(filename)
 	if err != nil {
 		panic(err)
@@ -38,6 +41,9 @@ func TestLayout(t *testing.T) {
 	}
 	if !bytes.Equal(dat, mustbe) {
 		t.Errorf("SHOULDBEEQ, %v, %v, \n%x\n%x", len(dat), len(mustbe), dat, mustbe)
+	}
+	if err := gian.Validate(filename) ; err != nil {
+		t.Errorf("MUST BE TRUE %v", err)
 	}
 }
 
@@ -198,12 +204,52 @@ func TestReadWriteSmallBigMix(t *testing.T) {
 	}
 }
 
-/*
-func TestCommit(t *testing.T) {
+func checkSumFile(filename string) string { return "" }
 
+// randomly change byte
+// file should large
+func messUpFile(filename string) {
+	file, err := os.OpenFile(filename, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0644)
+	if err != nil {
+		panic(err)
+
+	}
+
+	dat, err := os.ReadFile(filename)
+	if err != nil {
+		panic(err)
+	}
+
+	// fuckup random (up to) 100 bytes
+	for i := 0; i < 100; i++ {
+		loc := rand.Intn(len(dat) - 1)
+		dat[loc] = dat[loc]*2 + byte(i)
+	}
+
+	// dupplicate some byte, remove somebyte
+	newdata := []byte{}
+	for _, b := range dat {
+		if rand.Intn(len(dat))%10 == 0 {
+			newdata = append(newdata, b)
+			newdata = append(newdata, b)
+		} else {
+			newdata = append(newdata, b)
+		}
+	}
+	if err := os.WriteFile(filename, newdata, 0x777); err != nil {
+		panic(err)
+	}
+
+	file.Close()
 }
 
+func cutFileHead(filename string, length int64) {
+}
 
+func cutFileTail(filename string, length int64) {
+}
+
+/*
 
 func TestHealingFromBackup(t *testing.T) {
 	file, _ := ioutil.TempFile("", "*.dat")
@@ -244,17 +290,7 @@ func TestHealingFromBackup(t *testing.T) {
 	}
 }
 
-func checkSumFile(filename string) string {}
 
-// randomly change byte
-func messUpFile(filename string) {
-}
-
-func cutFileHead(filename string, length int64) {
-}
-
-func cutFileTail(filename string, length int64) {
-}
 
 func TestHealingBackup(t *testing.T) {
 	file, _ := ioutil.TempFile("", "*.dat")
