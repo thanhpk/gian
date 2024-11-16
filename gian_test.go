@@ -2,8 +2,9 @@ package gian
 
 import (
 	"bytes"
+	"crypto/md5"
 	"encoding/binary"
-	_ "fmt"
+	"fmt"
 	"io"
 	"math/rand"
 	"os"
@@ -13,8 +14,8 @@ import (
 func TestLayout(t *testing.T) {
 	file, _ := os.CreateTemp("", "*.dat")
 	filename := file.Name()
-	// defer os.Remove(file.Name())
-	// defer os.Remove(filename + ".bak")
+	defer os.Remove(file.Name())
+	defer os.Remove(filename + ".bak")
 	gian := NewGian(filename)
 	gian.Write([]byte("hello"))
 	gian.ForceCommit()
@@ -220,7 +221,20 @@ func TestReadWriteSmallBigMix(t *testing.T) {
 	}
 }
 
-func checkSumFile(filename string) string { return "" }
+func checkSumFile(filename string) string {
+	f, err := os.Open(filename)
+	if err != nil {
+		panic(err)
+	}
+	defer f.Close()
+
+	h := md5.New()
+	if _, err := io.Copy(h, f); err != nil {
+		panic(err)
+	}
+
+	return fmt.Sprintf("%x", h.Sum(nil))
+}
 
 // randomly change byte
 // file should large
@@ -236,9 +250,16 @@ func messUpFile(filename string) {
 		panic(err)
 	}
 
+	if len(dat) == 0 {
+		return
+	}
+
 	// fuckup random (up to) 100 bytes
 	for i := 0; i < 100; i++ {
-		loc := rand.Intn(len(dat) - 1)
+		loc := rand.Intn(len(dat) + 1)
+		if loc > 1 {
+			loc -= 2
+		}
 		dat[loc] = dat[loc]*2 + byte(i)
 	}
 
@@ -259,68 +280,109 @@ func messUpFile(filename string) {
 	file.Close()
 }
 
-func cutFileHead(filename string, length int64) {
-}
-
-func cutFileTail(filename string, length int64) {
-}
-
-/*
-
-func TestHealingFromBackup(t *testing.T) {
-	file, _ := ioutil.TempFile("", "*.dat")
-	defer os.Remove(filename)
-	defer os.Remove(filename + ".bak")
-	filename := file.Name()
-	gian := NewGian(filename)
-	for i := range 1000 {
-		gian.Write([]byte(i))
-	}
-	gian.Commit()
-
-	os.Remote(filename) // remove backup file
-	if err := gian.Fix(filename); err != nil {
+func cutFileHead(filename string, length int) {
+	dat, err := os.ReadFile(filename)
+	if err != nil {
 		panic(err)
 	}
 
-	if checkSumFile(filename) != checkSumFile(filename+".bak") {
+	if len(dat) < length {
+		if err := os.WriteFile(filename, []byte{}, 0x777); err != nil {
+			panic(err)
+		}
+	}
+
+	dat = dat[length:]
+	if err := os.WriteFile(filename, dat, 0x777); err != nil {
+		panic(err)
+	}
+}
+
+func cutFileTail(filename string, length int) {
+	dat, err := os.ReadFile(filename)
+	if err != nil {
+		panic(err)
+	}
+
+	if len(dat) < length {
+		if err := os.WriteFile(filename, []byte{}, 0x777); err != nil {
+			panic(err)
+		}
+	}
+
+	dat = dat[:len(dat)-length]
+	if err := os.WriteFile(filename, dat, 0x777); err != nil {
+		panic(err)
+	}
+}
+
+func TestHealingFromBackup(t *testing.T) {
+	file, _ := os.CreateTemp("", "*.dat")
+	filename := file.Name()
+	defer os.Remove(filename)
+	defer os.Remove(filename + ".bak")
+	gian := NewGian(filename)
+	N := 10000
+	for i := range N {
+		b := [4]byte{}
+		binary.BigEndian.PutUint32(b[:], uint32(i))
+		gian.Write(b[:])
+	}
+	gian.ForceCommit()
+	cs := checkSumFile(filename + ".bak")
+	os.Remove(filename) // remove file
+	if err := gian.Fix(); err != nil {
+		panic(err)
+	}
+
+	if checkSumFile(filename) != cs {
 		t.Errorf("MUST HEAL")
 	}
 
-	cutFileHead(filename)
-	if err := gian.Fix(filename); err != nil {
+	cutFileHead(filename, 100)
+	if err := gian.Fix(); err != nil {
 		panic(err)
 	}
 
-	if checkSumFile(filename) != checkSumFile(filename+".bak") {
+	if checkSumFile(filename) != cs {
 		t.Errorf("MUST HEAL")
 	}
 
 	messUpFile(filename)
-	if err := gian.Fix(filename); err != nil {
+	if err := gian.Fix(); err != nil {
 		panic(err)
 	}
 
-	if checkSumFile(filename) != checkSumFile(filename+".bak") {
+	if checkSumFile(filename) != cs {
+		t.Errorf("MUST HEAL")
+	}
+
+	cutFileTail(filename, 100)
+	if err := gian.Fix(); err != nil {
+		panic(err)
+	}
+
+	if checkSumFile(filename) != cs {
 		t.Errorf("MUST HEAL")
 	}
 }
 
-
-
 func TestHealingBackup(t *testing.T) {
-	file, _ := ioutil.TempFile("", "*.dat")
+	file, _ := os.CreateTemp("", "*.dat")
+	filename := file.Name()
 	defer os.Remove(filename)
 	defer os.Remove(filename + ".bak")
-	filename := file.Name()
 	gian := NewGian(filename)
-	for i := range 1000 {
-		gian.Write([]byte(i))
+	N := 10000
+	for i := range N {
+		b := [4]byte{}
+		binary.BigEndian.PutUint32(b[:], uint32(i))
+		gian.Write(b[:])
 	}
-	gian.Commit()
+	gian.ForceCommit()
 
-	os.Remote(filename + ".bak") // remove backup file
-	if err := gian.Fix(filename); err != nil {
+	os.Remove(filename + ".bak") // remove backup file
+	if err := gian.Fix(); err != nil {
 		panic(err)
 	}
 
@@ -328,17 +390,27 @@ func TestHealingBackup(t *testing.T) {
 		t.Errorf("MUST HEAL")
 	}
 
-	cutFileInHalf(filename + ".bak")
-	if err := gian.Fix(filename); err != nil {
+	cutFileHead(filename+".bak", 100)
+	if err := gian.Fix(); err != nil {
 		panic(err)
 	}
-
+	if err := gian.Fix(); err != nil {
+		panic(err)
+	}
 	if checkSumFile(filename) != checkSumFile(filename+".bak") {
 		t.Errorf("MUST HEAL")
 	}
 
 	messUpFile(filename + ".bak")
-	if err := gian.Fix(filename); err != nil {
+	if err := gian.Fix(); err != nil {
+		panic(err)
+	}
+	if checkSumFile(filename) != checkSumFile(filename+".bak") {
+		t.Errorf("MUST HEAL")
+	}
+
+	cutFileTail(filename+".bak", 100)
+	if err := gian.Fix(); err != nil {
 		panic(err)
 	}
 
@@ -346,6 +418,9 @@ func TestHealingBackup(t *testing.T) {
 		t.Errorf("MUST HEAL")
 	}
 }
+
+/*
+
 
 func TestHealingBothMainAndBackup(t *testing.T) {
 	file, _ := ioutil.TempFile("", "*.dat")

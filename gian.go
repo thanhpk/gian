@@ -74,7 +74,7 @@ func (g *Gian) Write(data []byte) error {
 }
 
 func (g *Gian) Validate(filepath string) error {
-	file, err := os.Open(g.filepath)
+	file, err := os.Open(filepath)
 	if err != nil {
 		return err
 	}
@@ -152,9 +152,26 @@ func (g *Gian) Validate(filepath string) error {
 
 // force fix
 func (g *Gian) Fix() error {
-	return g.selfHealing()
+	fileErr := g.Validate(g.filepath)
+	bakFileErr := g.Validate(g.filepath + ".bak")
 
+	if fileErr == nil && bakFileErr == nil {
+		return nil
+	}
+
+	if fileErr == nil && bakFileErr != nil {
+		return CopyFile(g.filepath+".bak", g.filepath)
+	}
+
+	if fileErr != nil && bakFileErr == nil {
+		return CopyFile(g.filepath, g.filepath+".bak")
+	}
+
+	// hard case
+	return nil
+	return g.selfHealing()
 }
+
 func (g *Gian) fixUp(filepath, bakfilepath string) bool {
 	// moving for
 	for true {
@@ -321,4 +338,30 @@ func (g *Gian) Read() ([]byte, error) {
 	}
 
 	return readBuffer[0:l], nil
+}
+
+// copyFileContents copies the contents of the file named src to the file named
+// by dst. The file will be created if it does not already exist. If the
+// destination file exists, all it's contents will be replaced by the contents
+// of the source file.
+func CopyFile(dst, src string) (err error) {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		cerr := out.Close()
+		if err == nil {
+			err = cerr
+		}
+	}()
+	if _, err = io.Copy(out, in); err != nil {
+		return err
+	}
+	return out.Sync()
 }
