@@ -42,15 +42,16 @@ func TestLayout(t *testing.T) {
 	if !bytes.Equal(dat, mustbe) {
 		t.Errorf("SHOULDBEEQ, %v, %v, \n%x\n%x", len(dat), len(mustbe), dat, mustbe)
 	}
-	if err := gian.Validate(filename) ; err != nil {
+	if err := gian.Validate(filename); err != nil {
 		t.Errorf("MUST BE TRUE %v", err)
 	}
 }
 
 func TestReadWriteManySmall(t *testing.T) {
 	file, _ := os.CreateTemp("", "*.dat")
-	defer os.Remove(file.Name())
-	defer os.Remove(file.Name() + ".bak")
+	filename := file.Name()
+	defer os.Remove(filename)
+	defer os.Remove(filename + ".bak")
 
 	gian := NewGian(file.Name())
 	for i := range 1000 {
@@ -70,6 +71,10 @@ func TestReadWriteManySmall(t *testing.T) {
 		if int(readi) != 1000-i-1 {
 			t.Errorf("SHOULDEQ, got %d, want %d", readi, 1000-i-1)
 		}
+	}
+
+	if err := gian.Validate(filename); err != nil {
+		t.Errorf("MUST BE TRUE %v", err)
 	}
 }
 
@@ -102,6 +107,10 @@ func TestReadWriteManySmallCommit(t *testing.T) {
 		if i != int(i32) {
 			t.Errorf("SHOULDEQ, got %d, want %d", i32, i)
 		}
+	}
+
+	if err := gian.Validate(file.Name()); err != nil {
+		t.Errorf("MUST BE TRUE %v", err)
 	}
 }
 
@@ -150,6 +159,10 @@ func TestReadWriteBig(t *testing.T) {
 		if i != int(i32) {
 			t.Errorf("SHOULDEQ, got %d, want %d", i32, i)
 		}
+	}
+
+	if err := gian.Validate(file.Name()); err != nil {
+		t.Errorf("MUST BE TRUE %v", err)
 	}
 }
 
@@ -201,6 +214,9 @@ func TestReadWriteSmallBigMix(t *testing.T) {
 		if i != int(i32) {
 			t.Errorf("SHOULDEQ, got %d, want %d", i32, i)
 		}
+	}
+	if err := gian.Validate(file.Name()); err != nil {
+		t.Errorf("MUST BE TRUE %v", err)
 	}
 }
 

@@ -2,6 +2,7 @@ package gian
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"hash/crc32"
 	"io"
@@ -72,8 +73,81 @@ func (g *Gian) Write(data []byte) error {
 	return nil
 }
 
-func (g *Gian) validate(filepath string) bool {
-	return true
+func (g *Gian) Validate(filepath string) error {
+	file, err := os.Open(g.filepath)
+	if err != nil {
+		return err
+	}
+
+	lastIndex := 0
+	crc := crc32.NewIEEE()
+	checksumb := [4]byte{}
+	lastChecksumB := [4]byte{}
+	indexb := [8]byte{}
+	lenb := [4]byte{}
+	data := make([]byte, 4096)
+	for {
+		crc.Reset()
+		_, err := file.Read(indexb[:])
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		crc.Write(lastChecksumB[:])
+		crc.Write(indexb[:])
+
+		index := int(binary.BigEndian.Uint64(indexb[:]))
+		if index != lastIndex+1 {
+			return errors.New("wrong index")
+		}
+		lastIndex = index
+
+		if _, err := file.Read(lenb[:]); err != nil {
+			return err
+		}
+		crc.Write(lenb[:])
+
+		l := binary.BigEndian.Uint32(lenb[:])
+		if l > ONEGB { // 1GB {
+			// wrong length -> broken file
+			return errors.New("wrong length 3")
+		}
+
+		if int(l) > len(data) {
+			data = make([]byte, int(l))
+		}
+		n, err := file.Read(data[:l])
+		if err != nil {
+			return err
+		}
+		if n != int(l) {
+			return errors.New("wrong len")
+		}
+
+		crc.Write(data[:l])
+		crc.Write(lenb[:])
+		if _, err := file.Read(lenb[:]); err != nil {
+			return err
+		}
+		l2 := binary.BigEndian.Uint32(lenb[:])
+		if l2 != l { // 1GB {
+			return errors.New("wrong length")
+		}
+
+		if _, err := file.Read(checksumb[:]); err != nil {
+			return err
+		}
+
+		checksum := binary.BigEndian.Uint32(checksumb[:])
+		if checksum != crc.Sum32() {
+			return errors.New("wrong check sum")
+		}
+		copy(lastChecksumB[:], checksumb[:])
+	}
+
+	return nil
 }
 
 // force fix
@@ -92,11 +166,11 @@ func (g *Gian) fixUp(filepath, bakfilepath string) bool {
 
 func (g *Gian) selfHealing() error {
 	// main file broken
-	if !g.validate(g.filepath) {
+	if nil != g.Validate(g.filepath) {
 	}
 
 	// backup file roken
-	if !g.validate(g.filepath + ".bak") {
+	if g.Validate(g.filepath+".bak") != nil {
 	}
 	return nil
 }
