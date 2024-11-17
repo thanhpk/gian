@@ -151,7 +151,6 @@ func (g *Gian) Validate(filepath string) error {
 func (g *Gian) Fix() error {
 	fileErr := g.Validate(g.filepath)
 	bakFileErr := g.Validate(g.filepath + ".bak")
-
 	if fileErr == nil && bakFileErr == nil {
 		return nil
 	}
@@ -163,8 +162,15 @@ func (g *Gian) Fix() error {
 	if fileErr != nil && bakFileErr == nil {
 		return CopyFile(g.filepath, g.filepath+".bak")
 	}
-	// hard case
-	return nil
+
+	fileErr = g.Validate(g.filepath)
+	bakFileErr = g.Validate(g.filepath + ".bak")
+	if fileErr == nil && bakFileErr == nil {
+		return nil
+	}
+
+	fmt.Println("EEEEEE", fileErr, bakFileErr)
+	return errors.New("cannot fix." + g.filepath)
 }
 
 func (g *Gian) fixUp(filepath, bakfilepath string) bool {
@@ -193,6 +199,45 @@ func (g *Gian) commit(data []byte) error {
 			if err := g.Fix(); err != nil {
 				return err
 			}
+		}
+
+		file, err := os.OpenFile(g.filepath, os.O_RDONLY, 0644)
+		if err != nil {
+			return err
+		}
+		defer file.Close()
+
+		rr := NewRReaderSize(file, 1024)
+		b4 := [4]byte{}
+		n, err := rr.Read(b4[:])
+		if err != nil && err != io.EOF {
+			return err
+		}
+		checksum := binary.BigEndian.Uint32(b4[:])
+		g.lastCheckSum = checksum
+		g.lastWriteIndex = 0
+		// not empty file
+		if n != 0 {
+			if _, err := rr.Read(b4[:]); err != nil {
+				return err
+			}
+			l := binary.BigEndian.Uint32(b4[:])
+			if l > ONEGB { // 1GB {
+				return errors.New("wrong length, very broken")
+			}
+			b := make([]byte, l)
+			if _, err := rr.Read(b); err != nil {
+				return err
+			}
+			if _, err := rr.Read(b4[:]); err != nil {
+				return err
+			}
+			indexb := [8]byte{}
+			if _, err := rr.Read(indexb[:]); err != nil {
+				return err
+			}
+			index := int(binary.BigEndian.Uint64(indexb[:]))
+			g.lastWriteIndex = index
 		}
 		g.loaded = true
 	}
@@ -283,7 +328,7 @@ func (g *Gian) openFile() error {
 	return nil
 }
 
-func (g *Gian) fixThenRead() ([]byte, error) {
+func (g *Gian) fixThenRead(reason string) ([]byte, error) {
 	if err := g.Fix(); err != nil {
 		return nil, err
 	}
@@ -373,7 +418,7 @@ func (g *Gian) Read() ([]byte, error) {
 	}
 	l := binary.BigEndian.Uint32(lenb[:])
 	if l > ONEGB { // 1GB {
-		return g.fixThenRead()
+		return g.fixThenRead("wrong len")
 	}
 
 	readBuffer := g.readBuffer
@@ -387,14 +432,14 @@ func (g *Gian) Read() ([]byte, error) {
 
 	if _, err := g.rr.Read(lenb[:]); err != nil {
 		if err == io.EOF {
-			return g.fixThenRead()
+			return g.fixThenRead("here" + err.Error())
 		}
 		return nil, err
 	}
 
 	l2 := binary.BigEndian.Uint32(lenb[:])
 	if l2 != l {
-		return g.fixThenRead()
+		return g.fixThenRead("wrong len2")
 		//		return nil, errors.New("wrong length, broken file")
 	}
 
@@ -411,8 +456,7 @@ func (g *Gian) Read() ([]byte, error) {
 		if n, _ := g.rr.Read(onebyte[:]); n != 0 {
 			// has extra byte in the begging of the file
 			// return nil, errors.New("begining corrupted")
-
-			return g.fixThenRead()
+			return g.fixThenRead("no extra byte")
 		}
 		return data, nil
 	}
@@ -432,16 +476,14 @@ func (g *Gian) Read() ([]byte, error) {
 	// confirm the checksum
 	checksum := binary.BigEndian.Uint32(g.lastReadCheckSumB[:])
 	if checksum != crc.Sum32() {
-		return g.fixThenRead()
-		// return nil, errors.New("invalid checksum")
+		return g.fixThenRead("wrong checksum")
 	}
 	g.lastReadCheckSumB = prevchecksumb
 
 	if g.lastReadIndex == 0 {
 	} else {
 		if index+1 != g.lastReadIndex {
-			return g.fixThenRead()
-			// return nil, errors.New("wrong index, broken file")
+			return g.fixThenRead("wrong index")
 		}
 	}
 	g.lastReadIndex = int(index)

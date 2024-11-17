@@ -411,6 +411,26 @@ func cutFileTail(filename string, length int) {
 	}
 }
 
+func appendRandom(filename string, length int) {
+	dat, err := os.ReadFile(filename)
+	if err != nil {
+		panic(err)
+	}
+
+	if len(dat) < length {
+		if err := os.WriteFile(filename, []byte{}, 0x777); err != nil {
+			panic(err)
+		}
+	}
+
+	for i := range length {
+		dat = append(dat, byte(i%255))
+	}
+	if err := os.WriteFile(filename, dat, 0x777); err != nil {
+		panic(err)
+	}
+}
+
 func TestHealingFromBackup(t *testing.T) {
 	file, _ := os.CreateTemp("", "*.dat")
 	filename := file.Name()
@@ -514,9 +534,60 @@ func TestHealingBackup(t *testing.T) {
 	}
 }
 
+func TestWriteToBrokenFile(t *testing.T) {
+	file, _ := os.CreateTemp("", "*.dat")
+	defer os.Remove(file.Name())
+	defer os.Remove(file.Name() + ".bak")
+
+	gian := NewGian(file.Name())
+	const N = 1000
+	for i := range N {
+		b := [4]byte{}
+		binary.BigEndian.PutUint32(b[:], uint32(i))
+		gian.Write(b[:])
+	}
+	gian.ForceCommit()
+	gian.Close()
+	appendRandom(file.Name(), 10000)
+	gian = NewGian(file.Name())
+	b := [4]byte{}
+	binary.BigEndian.PutUint32(b[:], uint32(N))
+	gian.Write(b[:])
+	gian.ForceCommit()
+
+	out, err := gian.Read()
+	if err != nil {
+		panic(err)
+	}
+	if !bytes.Equal(b[:], out[:]) {
+		t.Errorf("MUST EQ, got %x, want %x", out, b)
+	}
+	out = []byte{}
+	for {
+		b, err := gian.Read()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			panic(err)
+		}
+		tmp := append([]byte{}, b...)
+		out = append(tmp, out...)
+	}
+
+	for i := 0; i < N; i++ {
+		i32 := binary.BigEndian.Uint32(out[i*4 : i*4+4])
+		if i != int(i32) {
+			t.Errorf("SHOULDEQ, got %d, want %d", i32, i)
+		}
+	}
+
+	if err := gian.Validate(file.Name()); err != nil {
+		t.Errorf("MUST BE TRUE %v", err)
+	}
+}
+
 /*
-
-
 func TestHealingBothMainAndBackup(t *testing.T) {
 	file, _ := ioutil.TempFile("", "*.dat")
 	defer os.Remove(filename)
@@ -557,20 +628,4 @@ func TestHealingBothMainAndBackup(t *testing.T) {
 		t.Errorf("CANNOT FIX, MUST ERR")
 	}
 }
-
-func TestWriteToBrokenFile(t *testing.T) {
-	file, err := ioutil.TempFile("dir", "myname.*.bat")
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer os.Remove(file.Name())
-	gian := NewGian(file.Name())
-	for i := range 1000 {
-		gian.Write([]byte(i))
-	}
-
-	gian.Commit()
-
-}
-
 */
