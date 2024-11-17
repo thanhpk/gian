@@ -410,6 +410,10 @@ func (g *Gian) Read() ([]byte, error) {
 		if _, err := g.rr.Read(g.lastReadCheckSumB[:]); err != nil {
 			return nil, err
 		}
+
+		if g.uncommitLength > 0 {
+			return g.uncommitBuffer[:g.uncommitLength], nil
+		}
 	}
 
 	lenb := [4]byte{}
