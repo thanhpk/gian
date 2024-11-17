@@ -165,13 +165,35 @@ func (g *Gian) Fix() error {
 		return CopyFile(g.filepath, g.filepath+".bak")
 	}
 
+	headIndex, headdata := LoadForward(g.filepath)
+	bakheadIndex, bakheaddata := LoadForward(g.filepath + ".bak")
+	if headIndex < bakheadIndex {
+		headIndex = bakheadIndex
+		headdata = bakheaddata
+	}
+
+	pass, taildata := LoadBackwardToIndex(g.filepath, headIndex)
+
+	if !pass {
+		pass, taildata = LoadBackwardToIndex(g.filepath+".bak", headIndex)
+	}
+	if !pass {
+		return errors.New("cannot fix." + g.filepath)
+	}
+
+	fixed := append(headdata, taildata...)
+	if err := os.WriteFile(g.filepath, fixed, 0x777); err != nil {
+		return err
+	}
+	if err := os.WriteFile(g.filepath+".bak", fixed, 0x777); err != nil {
+		return err
+	}
+
 	fileErr = g.Validate(g.filepath)
 	bakFileErr = g.Validate(g.filepath + ".bak")
 	if fileErr == nil && bakFileErr == nil {
 		return nil
 	}
-
-	fmt.Println("EEEEEE", fileErr, bakFileErr)
 	return errors.New("cannot fix." + g.filepath)
 }
 
@@ -329,6 +351,201 @@ func (g *Gian) fixThenRead(reason string) ([]byte, error) {
 		return nil, err
 	}
 	return g.Read()
+}
+
+func LoadForward(filepath string) (int, []byte) {
+	out := []byte{}
+	file, err := os.Open(filepath)
+	if err != nil {
+		return 0, nil
+	}
+	defer file.Close()
+	lastIndex := 0
+	crc := crc32.NewIEEE()
+	checksumb := [4]byte{}
+	lastChecksumB := [4]byte{}
+	indexb := [8]byte{}
+	lenb := [4]byte{}
+	data := make([]byte, 4096)
+	for {
+		crc.Reset()
+		_, err := file.Read(indexb[:])
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return lastIndex, out
+		}
+		crc.Write(lastChecksumB[:])
+		crc.Write(indexb[:])
+
+		index := int(binary.BigEndian.Uint64(indexb[:]))
+		if index != lastIndex+1 {
+			return lastIndex, out
+		}
+		lastIndex = index
+
+		if _, err := file.Read(lenb[:]); err != nil {
+			return lastIndex, out
+		}
+		crc.Write(lenb[:])
+
+		l := binary.BigEndian.Uint32(lenb[:])
+		if l > ONEGB { // 1GB {
+			// wrong length -> broken file
+			return lastIndex, out
+		}
+
+		if int(l) > len(data) {
+			data = make([]byte, int(l))
+		}
+		n, err := file.Read(data[:l])
+		if err != nil {
+			return lastIndex, out
+		}
+		if n != int(l) {
+			return lastIndex, out
+		}
+
+		crc.Write(data[:l])
+		crc.Write(lenb[:])
+		if _, err := file.Read(lenb[:]); err != nil {
+			return lastIndex, out
+		}
+		l2 := binary.BigEndian.Uint32(lenb[:])
+		if l2 != l { // 1GB {
+			return lastIndex, out
+		}
+
+		if _, err := file.Read(checksumb[:]); err != nil {
+			return lastIndex, out
+		}
+
+		checksum := binary.BigEndian.Uint32(checksumb[:])
+		if checksum != crc.Sum32() {
+			return lastIndex, out
+		}
+
+		out = append(out, indexb[:]...)
+		out = append(out, lenb[:]...)
+		out = append(out, data[:l]...)
+		out = append(out, lenb[:]...)
+		out = append(out, checksumb[:]...)
+		copy(lastChecksumB[:], checksumb[:])
+	}
+
+	return lastIndex, out
+}
+
+func LoadBackwardToIndex(filepath string, _headIndex int) (bool, []byte) {
+	headIndex := _headIndex
+	if headIndex <= 1 {
+		headIndex = 1
+	}
+	file, err := os.OpenFile(filepath, os.O_RDONLY, 0644)
+	if err != nil {
+		return false, nil
+	}
+	defer file.Close()
+	rr := NewRReaderSize(file, 1024)
+
+	readBuffer := []byte{}
+	checksumb := [4]byte{}
+	prevchecksumb := [4]byte{}
+	lenb := [4]byte{}
+	indexb := [8]byte{}
+
+	out := [][]byte{}
+	var lastReadIndex int
+
+	_, err = rr.Read(checksumb[:])
+	if err == io.EOF && _headIndex == 0 {
+		return true, nil
+	}
+	if err != nil && err != io.EOF {
+		return false, nil
+	}
+	for {
+		if _, err := rr.Read(lenb[:]); err != nil {
+			return false, nil
+		}
+		l := binary.BigEndian.Uint32(lenb[:])
+		if l > ONEGB { // 1GB {
+			return false, nil
+		}
+		if int(l) > len(readBuffer) {
+			readBuffer = make([]byte, l)
+		}
+		if _, err := rr.Read(readBuffer[:l]); err != nil {
+			return false, nil
+		}
+
+		if n, err := rr.Read(lenb[:]); err != nil || n != 4 {
+			return false, nil
+		}
+
+		l2 := binary.BigEndian.Uint32(lenb[:])
+		if l2 != l {
+			return false, nil
+		}
+
+		if n, err := rr.Read(indexb[:]); err != nil || n != 8 {
+			return false, nil
+		}
+
+		index := int(binary.BigEndian.Uint64(indexb[:]))
+		data := readBuffer[0:l]
+
+		// do check sum
+		if index > 1 {
+			if _, err := rr.Read(prevchecksumb[:]); err != nil {
+				return false, nil
+			}
+		} else {
+			prevchecksumb[0], prevchecksumb[1], prevchecksumb[2], prevchecksumb[3] = 0, 0, 0, 0
+		}
+		crc := crc32.NewIEEE()
+		crc.Write(prevchecksumb[:])
+		crc.Write(indexb[:])
+		crc.Write(lenb[:])
+		crc.Write(data[:])
+		crc.Write(lenb[:])
+
+		// confirm the checksum
+
+		checksum := binary.BigEndian.Uint32(checksumb[:])
+		if checksum != crc.Sum32() {
+			return false, nil
+		}
+
+		if lastReadIndex != 0 {
+			if index+1 != lastReadIndex {
+				return false, nil
+			}
+		}
+		lastReadIndex = int(index)
+
+		ele := []byte{}
+		ele = append([]byte{}, indexb[:]...)
+		ele = append(ele, lenb[:]...)
+		ele = append(ele, data[:]...)
+		ele = append(ele, lenb[:]...)
+		ele = append(ele, checksumb[:]...)
+		out = append(out, ele)
+		copy(checksumb[:], prevchecksumb[:])
+		if lastReadIndex == headIndex {
+			break
+		}
+	}
+
+	if lastReadIndex == headIndex {
+		res := []byte{}
+		for i := len(out) - 1; i >= 0; i-- {
+			res = append(res, out[i]...)
+		}
+		return true, res
+	}
+	return false, nil
 }
 
 func (g *Gian) readToIndex(toindex int) error {
