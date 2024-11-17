@@ -72,10 +72,8 @@ func TestDetectCorrupt(t *testing.T) {
 	}
 
 	gian = NewGian(filename)
-	if _, err := gian.Read(); err == nil {
-		t.Errorf("MUST BE ERR")
-	} else {
-		fmt.Println("ER", err)
+	if _, err := gian.Read(); err != nil {
+		t.Errorf("MUST BE NO ERR")
 	}
 }
 
@@ -106,18 +104,16 @@ func TestReadOne(t *testing.T) {
 	if err := gian.Validate(filename); err != nil {
 		t.Errorf("MUST BE TRUE %v", err)
 	}
-	fmt.Println("ERR", err)
 }
 
 func TestReadWriteManySmallx(t *testing.T) {
 	file, _ := os.CreateTemp("", "*.dat")
 	filename := file.Name()
-	// defer os.Remove(filename)
-	// defer os.Remove(filename + ".bak")
+	defer os.Remove(filename)
+	defer os.Remove(filename + ".bak")
 
 	gian := NewGian(file.Name())
-	const N = 2
-
+	const N = 1000
 	for i := range N {
 		b := [4]byte{}
 		binary.BigEndian.PutUint32(b[:], uint32(i))
@@ -139,6 +135,39 @@ func TestReadWriteManySmallx(t *testing.T) {
 
 	if err := gian.Validate(filename); err != nil {
 		t.Errorf("MUST BE TRUE %v", err)
+	}
+}
+
+func TestReadFromBrokenFile(t *testing.T) {
+	file, _ := os.CreateTemp("", "*.dat")
+	filename := file.Name()
+	defer os.Remove(filename)
+	defer os.Remove(filename + ".bak")
+
+	gian := NewGian(file.Name())
+	const N = 10_000
+
+	for i := range N {
+		b := [4]byte{}
+		binary.BigEndian.PutUint32(b[:], uint32(i))
+		gian.Write(b[:])
+		gian.ForceCommit()
+	}
+
+	for r := range 100 {
+		messUpFile(filename)
+		gian = NewGian(filename)
+		for i := 0; i < N; i++ {
+			b, err := gian.Read()
+			if err != nil {
+				t.Errorf("RUN %d, ERR %d %v", r, i, err)
+				return
+			}
+			readi := binary.BigEndian.Uint32(b[:])
+			if int(readi) != N-i-1 {
+				t.Errorf("SHOULDEQ RUN %d, got %d, want %d", r, readi, N-i-1)
+			}
+		}
 	}
 }
 

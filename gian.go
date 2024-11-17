@@ -14,6 +14,7 @@ const ONEGB = 1 * 1024 * 1024 * 1024
 
 // self healing file
 type Gian struct {
+	dead     bool
 	filepath string
 
 	// writing
@@ -30,8 +31,6 @@ type Gian struct {
 	lastReadCheckSumB [4]byte
 	lastReadIndex     int
 	readBuffer        []byte
-
-	dead bool
 }
 
 func NewGian(filepath string) *Gian {
@@ -42,8 +41,6 @@ func NewGian(filepath string) *Gian {
 
 		lastReadIndex: 0,
 		readBuffer:    make([]byte, CHUNKSIZE),
-
-		dead: false,
 	}
 	return me
 }
@@ -166,10 +163,8 @@ func (g *Gian) Fix() error {
 	if fileErr != nil && bakFileErr == nil {
 		return CopyFile(g.filepath, g.filepath+".bak")
 	}
-
 	// hard case
 	return nil
-	return g.selfHealing()
 }
 
 func (g *Gian) fixUp(filepath, bakfilepath string) bool {
@@ -288,6 +283,81 @@ func (g *Gian) openFile() error {
 	return nil
 }
 
+func (g *Gian) fixThenRead() ([]byte, error) {
+	if err := g.Fix(); err != nil {
+		return nil, err
+	}
+	g.file = nil
+	if err := g.readToIndex(g.lastReadIndex); err != nil {
+		return nil, err
+	}
+	return g.Read()
+}
+
+func (g *Gian) readToIndex(toindex int) error {
+	if toindex == 0 {
+		return nil
+	}
+	if g.file == nil {
+		g.openFile()
+	}
+	readBuffer := []byte{}
+	lenb := [4]byte{}
+
+	// skip fist checksum
+	if _, err := g.rr.Read(lenb[:]); err != nil {
+		return err
+	}
+
+	var lastReadIndex int
+	for {
+		if _, err := g.rr.Read(lenb[:]); err != nil {
+			return err
+		}
+		l := binary.BigEndian.Uint32(lenb[:])
+		if l > ONEGB { // 1GB {
+			return errors.New("wrong length, very broken")
+		}
+
+		if int(l) > len(readBuffer) {
+			readBuffer = make([]byte, l)
+		}
+
+		if _, err := g.rr.Read(readBuffer[:l]); err != nil {
+			return err
+		}
+
+		if _, err := g.rr.Read(lenb[:]); err != nil {
+			return err
+		}
+
+		indexb := [8]byte{}
+		if _, err := g.rr.Read(indexb[:]); err != nil {
+			return err
+		}
+
+		index := int(binary.BigEndian.Uint64(indexb[:]))
+		if lastReadIndex != 0 {
+			if index+1 != lastReadIndex {
+				return errors.New("wrong index, broken file")
+			}
+		}
+
+		if index < toindex {
+			return errors.New("wrong index, VERY broken file")
+		}
+
+		// skip checksum
+		if _, err := g.rr.Read(lenb[:]); err != nil {
+			return err
+		}
+		lastReadIndex = index
+		if index == toindex {
+			return nil // ok
+		}
+	}
+}
+
 func (g *Gian) Read() ([]byte, error) {
 	if g.file == nil {
 		g.openFile()
@@ -303,9 +373,7 @@ func (g *Gian) Read() ([]byte, error) {
 	}
 	l := binary.BigEndian.Uint32(lenb[:])
 	if l > ONEGB { // 1GB {
-
-		// wrong length -> broken file
-
+		return g.fixThenRead()
 	}
 
 	readBuffer := g.readBuffer
@@ -318,26 +386,23 @@ func (g *Gian) Read() ([]byte, error) {
 	}
 
 	if _, err := g.rr.Read(lenb[:]); err != nil {
+		if err == io.EOF {
+			return g.fixThenRead()
+		}
 		return nil, err
 	}
+
 	l2 := binary.BigEndian.Uint32(lenb[:])
 	if l2 != l {
-		return nil, errors.New("wrong length, broken file")
+		return g.fixThenRead()
+		//		return nil, errors.New("wrong length, broken file")
 	}
 
 	indexb := [8]byte{}
 	if _, err := g.rr.Read(indexb[:]); err != nil {
 		return nil, err
 	}
-
 	index := int(binary.BigEndian.Uint64(indexb[:]))
-	if g.lastReadIndex == 0 {
-		g.lastReadIndex = int(index)
-	} else {
-		if index != g.lastReadIndex {
-			return nil, errors.New("wrong index, broken file")
-		}
-	}
 
 	data := readBuffer[0:l]
 	if index == 1 {
@@ -345,7 +410,9 @@ func (g *Gian) Read() ([]byte, error) {
 		onebyte := []byte{0}
 		if n, _ := g.rr.Read(onebyte[:]); n != 0 {
 			// has extra byte in the begging of the file
-			return nil, errors.New("begining corrupted")
+			// return nil, errors.New("begining corrupted")
+
+			return g.fixThenRead()
 		}
 		return data, nil
 	}
@@ -365,9 +432,20 @@ func (g *Gian) Read() ([]byte, error) {
 	// confirm the checksum
 	checksum := binary.BigEndian.Uint32(g.lastReadCheckSumB[:])
 	if checksum != crc.Sum32() {
-		return nil, errors.New("invalid checksum")
+		return g.fixThenRead()
+		// return nil, errors.New("invalid checksum")
 	}
 	g.lastReadCheckSumB = prevchecksumb
+
+	if g.lastReadIndex == 0 {
+	} else {
+		if index+1 != g.lastReadIndex {
+			return g.fixThenRead()
+			// return nil, errors.New("wrong index, broken file")
+		}
+	}
+	g.lastReadIndex = int(index)
+
 	return data, nil
 }
 
