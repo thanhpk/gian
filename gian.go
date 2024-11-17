@@ -24,12 +24,12 @@ type Gian struct {
 	uncommitLength int
 	uncommitBuffer []byte
 
-	file *os.File
-	rr   *RReader
-
 	// reading
-	lastReadIndex int
-	readBuffer    []byte
+	file              *os.File
+	rr                *RReader
+	lastReadCheckSumB [4]byte
+	lastReadIndex     int
+	readBuffer        []byte
 
 	dead bool
 }
@@ -193,27 +193,31 @@ func (g *Gian) selfHealing() error {
 }
 
 func (g *Gian) commit(data []byte) error {
+	if !g.loaded {
+		if err := g.Validate(g.filepath); err != nil {
+			if err := g.Fix(); err != nil {
+				return err
+			}
+		}
+		g.loaded = true
+	}
+
 	if len(data) == 0 {
 		return nil
 	}
-	// validate first
 
 	file, err := os.OpenFile(g.filepath, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0644)
 	if err != nil {
 		return err
-		// return log.EServer(err, log.M{"account_id": accid, "collection": col, "db": db, "filename": filename})
 	}
 
 	bakfile, err := os.OpenFile(g.filepath+".bak", os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0644)
 	if err != nil {
 		return err
-		// return log.EServer(err, log.M{"account_id": accid, "collection": col, "db": db, "filename": filename})
 	}
 
-	crc := crc32.NewIEEE()
 	lastchecksumb := [4]byte{}
 	binary.BigEndian.PutUint32(lastchecksumb[:], g.lastCheckSum)
-	// fmt.Println("KKKKK", g.lastCheckSum, g.lastWriteIndex+1)
 
 	indexB := [8]byte{}
 	binary.BigEndian.PutUint64(indexB[:], uint64(g.lastWriteIndex+1))
@@ -221,6 +225,7 @@ func (g *Gian) commit(data []byte) error {
 	lengthB := [4]byte{}
 	binary.BigEndian.PutUint32(lengthB[:], uint32(len(data)))
 
+	crc := crc32.NewIEEE()
 	crc.Write(lastchecksumb[:])
 	crc.Write(indexB[:])
 	crc.Write(lengthB[:])
@@ -286,21 +291,19 @@ func (g *Gian) openFile() error {
 func (g *Gian) Read() ([]byte, error) {
 	if g.file == nil {
 		g.openFile()
-	}
-	if g.lastReadIndex == -1 {
-		return nil, io.EOF
+		// read first checksum
+		if _, err := g.rr.Read(g.lastReadCheckSumB[:]); err != nil {
+			return nil, err
+		}
 	}
 
-	checksumb := [4]byte{}
-	if _, err := g.rr.Read(checksumb[:]); err != nil {
-		return nil, err
-	}
 	lenb := [4]byte{}
 	if _, err := g.rr.Read(lenb[:]); err != nil {
 		return nil, err
 	}
 	l := binary.BigEndian.Uint32(lenb[:])
 	if l > ONEGB { // 1GB {
+
 		// wrong length -> broken file
 
 	}
@@ -314,13 +317,12 @@ func (g *Gian) Read() ([]byte, error) {
 		return nil, err
 	}
 
-	lenb2 := [4]byte{}
-	if _, err := g.rr.Read(lenb2[:]); err != nil {
+	if _, err := g.rr.Read(lenb[:]); err != nil {
 		return nil, err
 	}
-	l2 := binary.BigEndian.Uint32(lenb2[:])
+	l2 := binary.BigEndian.Uint32(lenb[:])
 	if l2 != l {
-		// wrong length -> broken file -> fix up
+		return nil, errors.New("wrong length, broken file")
 	}
 
 	indexb := [8]byte{}
@@ -333,11 +335,40 @@ func (g *Gian) Read() ([]byte, error) {
 		g.lastReadIndex = int(index)
 	} else {
 		if index != g.lastReadIndex {
-			// broken file -> fix up
+			return nil, errors.New("wrong index, broken file")
 		}
 	}
 
-	return readBuffer[0:l], nil
+	data := readBuffer[0:l]
+	if index == 1 {
+		// do extra read must be eof
+		onebyte := []byte{0}
+		if n, _ := g.rr.Read(onebyte[:]); n != 0 {
+			// has extra byte in the begging of the file
+			return nil, errors.New("begining corrupted")
+		}
+		return data, nil
+	}
+	// do check sum
+	crc := crc32.NewIEEE()
+
+	prevchecksumb := [4]byte{}
+	if _, err := g.rr.Read(prevchecksumb[:]); err != nil {
+		return nil, err
+	}
+	crc.Write(prevchecksumb[:])
+	crc.Write(indexb[:])
+	crc.Write(lenb[:])
+	crc.Write(data[:])
+	crc.Write(lenb[:])
+
+	// confirm the checksum
+	checksum := binary.BigEndian.Uint32(g.lastReadCheckSumB[:])
+	if checksum != crc.Sum32() {
+		return nil, errors.New("invalid checksum")
+	}
+	g.lastReadCheckSumB = prevchecksumb
+	return data, nil
 }
 
 // copyFileContents copies the contents of the file named src to the file named

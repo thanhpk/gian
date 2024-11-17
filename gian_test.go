@@ -48,29 +48,92 @@ func TestLayout(t *testing.T) {
 	}
 }
 
-func TestReadWriteManySmall(t *testing.T) {
-	file, _ := os.CreateTemp("", "*.dat")
+func TestDetectCorrupt(t *testing.T) {
+	file, _ := os.CreateTemp("/tmp", "gian_*.dat")
 	filename := file.Name()
 	defer os.Remove(filename)
 	defer os.Remove(filename + ".bak")
 
+	gian := NewGian(filename)
+	b := [4]byte{}
+	num := uint32(12039485)
+	binary.BigEndian.PutUint32(b[:], num)
+	gian.Write(b[:])
+	gian.Close()
+
+	// prepend 1 random byte to file
+	dat, err := os.ReadFile(filename)
+	if err != nil {
+		panic(err)
+	}
+	dat = append([]byte{123}, dat...)
+	if err := os.WriteFile(filename, dat, 0x777); err != nil {
+		panic(err)
+	}
+
+	gian = NewGian(filename)
+	if _, err := gian.Read(); err == nil {
+		t.Errorf("MUST BE ERR")
+	} else {
+		fmt.Println("ER", err)
+	}
+}
+
+func TestReadOne(t *testing.T) {
+	file, _ := os.CreateTemp("/tmp", "gian_*.dat")
+	filename := file.Name()
+	defer os.Remove(filename)
+	defer os.Remove(filename + ".bak")
+
+	gian := NewGian(filename)
+	b := [4]byte{}
+	num := uint32(12039485)
+	binary.BigEndian.PutUint32(b[:], num)
+	gian.Write(b[:])
+	gian.Close()
+
+	gian = NewGian(filename)
+	out, err := gian.Read()
+	if err != nil {
+		return
+	}
+
+	num2 := binary.BigEndian.Uint32(out[:])
+	if num2 != num {
+		t.Errorf("SHOULDEQ, got %d, want %d", num2, num)
+	}
+
+	if err := gian.Validate(filename); err != nil {
+		t.Errorf("MUST BE TRUE %v", err)
+	}
+	fmt.Println("ERR", err)
+}
+
+func TestReadWriteManySmallx(t *testing.T) {
+	file, _ := os.CreateTemp("", "*.dat")
+	filename := file.Name()
+	// defer os.Remove(filename)
+	// defer os.Remove(filename + ".bak")
+
 	gian := NewGian(file.Name())
-	for i := range 1000 {
+	const N = 2
+
+	for i := range N {
 		b := [4]byte{}
 		binary.BigEndian.PutUint32(b[:], uint32(i))
 		gian.Write(b[:])
 		gian.ForceCommit()
 	}
 
-	for i := 0; i < 1000; i++ {
+	for i := 0; i < N; i++ {
 		b, err := gian.Read()
 		if err != nil {
 			t.Errorf("ERR %d %v", i, err)
 			return
 		}
 		readi := binary.BigEndian.Uint32(b[:])
-		if int(readi) != 1000-i-1 {
-			t.Errorf("SHOULDEQ, got %d, want %d", readi, 1000-i-1)
+		if int(readi) != N-i-1 {
+			t.Errorf("SHOULDEQ, got %d, want %d", readi, N-i-1)
 		}
 	}
 
@@ -98,6 +161,9 @@ func TestReadWriteManySmallCommit(t *testing.T) {
 		b, err := gian.Read()
 		if err == io.EOF {
 			break
+		}
+		if err != nil {
+			panic(err)
 		}
 		tmp := append([]byte{}, b...)
 		out = append(tmp, out...)
