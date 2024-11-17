@@ -617,17 +617,19 @@ func TestWriteToBrokenFile(t *testing.T) {
 	}
 }
 
-/*
 func TestHealingBothMainAndBackup(t *testing.T) {
-	file, _ := ioutil.TempFile("", "*.dat")
+	file, _ := os.CreateTemp("", "*.dat")
+	filename := file.Name()
 	defer os.Remove(filename)
 	defer os.Remove(filename + ".bak")
-	filename := file.Name()
 	gian := NewGian(filename)
-	for i := range 1000 {
-		gian.Write([]byte(i))
+	N := 10000
+	for i := range N {
+		b := [4]byte{}
+		binary.BigEndian.PutUint32(b[:], uint32(i))
+		gian.Write(b[:])
 	}
-	gian.Commit()
+	gian.ForceCommit()
 
 	cutFileHead(filename, 40)
 	cutFileTail(filename+".bak", 50)
@@ -658,4 +660,3 @@ func TestHealingBothMainAndBackup(t *testing.T) {
 		t.Errorf("CANNOT FIX, MUST ERR")
 	}
 }
-*/

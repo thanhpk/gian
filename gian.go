@@ -7,6 +7,7 @@ import (
 	"hash/crc32"
 	"io"
 	"os"
+	"time"
 )
 
 var CHUNKSIZE = 4096 // 4kb
@@ -42,6 +43,7 @@ func NewGian(filepath string) *Gian {
 		lastReadIndex: 0,
 		readBuffer:    make([]byte, CHUNKSIZE),
 	}
+	go me.autoCommit()
 	return me
 }
 
@@ -173,24 +175,14 @@ func (g *Gian) Fix() error {
 	return errors.New("cannot fix." + g.filepath)
 }
 
-func (g *Gian) fixUp(filepath, bakfilepath string) bool {
-	// moving for
-	for true {
-		// read num file 1
-
+func (g *Gian) autoCommit() {
+	time.Sleep(30 * time.Second)
+	for !g.dead {
+		time.Sleep(30 * time.Second)
+		if g.uncommitLength > 0 {
+			g.ForceCommit()
+		}
 	}
-	return true
-}
-
-func (g *Gian) selfHealing() error {
-	// main file broken
-	if nil != g.Validate(g.filepath) {
-	}
-
-	// backup file roken
-	if g.Validate(g.filepath+".bak") != nil {
-	}
-	return nil
 }
 
 func (g *Gian) commit(data []byte) error {
