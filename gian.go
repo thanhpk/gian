@@ -164,15 +164,17 @@ func mustInsync(f1, f2 string) error {
 	return errors.New("backup and bin not in sync")
 }
 
+func makeSurePath(filename string) {
+	paths := strings.Split(filename, "/")
+	if len(paths) > 1 {
+		dir := strings.Join(paths[:len(paths)-1], "/")
+		os.MkdirAll(dir, os.ModePerm)
+	}
+}
+
 func (g *Gian) commit(data []byte) error {
 	if !g.loaded {
-		paths := strings.Split(g.filename, "/")
-		if len(paths) > 1 {
-			dir := strings.Join(paths[:len(paths)-1], "/")
-			if err := os.MkdirAll(dir, os.ModePerm); err != nil {
-				return err
-			}
-		}
+		makeSurePath(g.filename)
 
 		if err := mustInsync(g.filename, g.filename+".bak"); err != nil {
 			if err := g.Fix(); err != nil {
@@ -291,18 +293,16 @@ func (g *Gian) ForceCommit() error {
 }
 
 func (g *Gian) openFile() error {
-	f, err := os.Open(g.filename)
+
+	makeSurePath(g.filename)
+
+	f, err := os.OpenFile(g.filename, os.O_RDONLY|os.O_CREATE, 0644)
 	if err != nil && !os.IsNotExist(err) {
 		return err
-		// log.Err("subiz", err, "CANNOT READ INDEXFIE", indexfile)
 	}
 
 	if f == nil {
-		f, err = os.OpenFile(g.filename, os.O_RDONLY|os.O_CREATE, 0644)
-		if err != nil {
-			return err
-			// return log.EServer(err, log.M{"account_id": accid, "collection": col, "db": db, "filename": filename})
-		}
+		panic("wtf" + err.Error())
 	}
 	g.file = f
 	g.rr = NewRReaderSize(f, CHUNKSIZE)
@@ -321,8 +321,9 @@ func (g *Gian) fixThenRead(reason string) ([]byte, error) {
 }
 
 func ReadFromStart(filename string, readdata bool) (int, []byte, error) {
+	// makeSurePath(filename)
 	out := []byte{}
-	file, err := os.Open(filename)
+	file, err := os.OpenFile(filename, os.O_RDONLY, 0644)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -520,7 +521,9 @@ func (g *Gian) readToIndex(toindex int) error {
 		return nil
 	}
 	if g.file == nil {
-		g.openFile()
+		if err := g.openFile(); err != nil {
+			return err
+		}
 	}
 	readBuffer := []byte{}
 	lenb := [4]byte{}
@@ -580,14 +583,7 @@ func (g *Gian) readToIndex(toindex int) error {
 }
 
 func (g *Gian) Rename(newname string) error {
-	paths := strings.Split(newname, "/")
-	if len(paths) > 1 {
-		dir := strings.Join(paths[:len(paths)-1], "/")
-		if err := os.MkdirAll(dir, os.ModePerm); err != nil {
-			return err
-		}
-	}
-
+	makeSurePath(newname)
 	os.Remove(newname)
 	return os.Rename(g.filename, newname)
 }
@@ -618,7 +614,9 @@ func (g *Gian) Reset() {
 
 func (g *Gian) Read() ([]byte, error) {
 	if g.file == nil {
-		g.openFile()
+		if err := g.openFile(); err != nil {
+			return nil, err
+		}
 		// read first checksum
 		if _, err := g.rr.Read(g.lastReadCheckSumB[:]); err != nil {
 			return nil, err
