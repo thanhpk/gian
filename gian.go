@@ -165,7 +165,6 @@ func mustInsync(f1, f2 string) error {
 }
 
 func (g *Gian) commit(data []byte) error {
-
 	if !g.loaded {
 		paths := strings.Split(g.filename, "/")
 		if len(paths) > 1 {
@@ -182,46 +181,48 @@ func (g *Gian) commit(data []byte) error {
 		}
 
 		file, err := os.OpenFile(g.filename, os.O_RDONLY, 0644)
-		if err != nil {
-			return err
-		}
-		defer file.Close()
+		if err == nil {
+			defer file.Close()
+			b4 := [4]byte{}
+			rr := NewRReaderSize(file, 1024)
+			n, err := rr.Read(b4[:])
+			if err != nil && err != io.EOF {
+				return err
+			}
+			// not empty file
+			if n != 0 {
+				checksum := binary.BigEndian.Uint32(b4[:])
+				g.lastCheckSum = checksum
+				g.lastWriteIndex = 0
 
-		rr := NewRReaderSize(file, 1024)
-		b4 := [4]byte{}
-		n, err := rr.Read(b4[:])
-		if err != nil && err != io.EOF {
-			return err
-		}
-		checksum := binary.BigEndian.Uint32(b4[:])
-		g.lastCheckSum = checksum
-		g.lastWriteIndex = 0
-		// not empty file
-		if n != 0 {
-			if _, err := rr.Read(b4[:]); err != nil {
+				if _, err := rr.Read(b4[:]); err != nil {
+					return err
+				}
+				l := binary.BigEndian.Uint32(b4[:])
+				if l > ONEGB { // 1GB {
+					return errors.New("wrong length, very broken")
+				}
+				b := make([]byte, l)
+				if _, err := rr.Read(b); err != nil {
+					return err
+				}
+				if _, err := rr.Read(b4[:]); err != nil {
+					return err
+				}
+				indexb := [8]byte{}
+				if _, err := rr.Read(indexb[:]); err != nil {
+					return err
+				}
+				index := int(binary.BigEndian.Uint64(indexb[:]))
+				g.lastWriteIndex = index
+			}
+		} else {
+			if !errors.Is(err, os.ErrNotExist) {
 				return err
 			}
-			l := binary.BigEndian.Uint32(b4[:])
-			if l > ONEGB { // 1GB {
-				return errors.New("wrong length, very broken")
-			}
-			b := make([]byte, l)
-			if _, err := rr.Read(b); err != nil {
-				return err
-			}
-			if _, err := rr.Read(b4[:]); err != nil {
-				return err
-			}
-			indexb := [8]byte{}
-			if _, err := rr.Read(indexb[:]); err != nil {
-				return err
-			}
-			index := int(binary.BigEndian.Uint64(indexb[:]))
-			g.lastWriteIndex = index
 		}
 		g.loaded = true
 	}
-
 	if len(data) == 0 {
 		return nil
 	}
