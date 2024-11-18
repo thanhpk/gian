@@ -16,7 +16,7 @@ func TestLayout(t *testing.T) {
 	filename := file.Name()
 	defer os.Remove(file.Name())
 	defer os.Remove(filename + ".bak")
-	gian := NewGian(filename)
+	gian := New(filename)
 	gian.Write([]byte("hello"))
 	gian.ForceCommit()
 	gian.Write([]byte("goodbye"))
@@ -54,7 +54,7 @@ func TestReadFromUncommit(t *testing.T) {
 	defer os.Remove(filename)
 	defer os.Remove(filename + ".bak")
 
-	gian := NewGian(filename)
+	gian := New(filename)
 	const N = 10
 	b := [4]byte{}
 	for i := range N {
@@ -84,7 +84,7 @@ func TestReadAll(t *testing.T) {
 	defer os.Remove(filename)
 	defer os.Remove(filename + ".bak")
 
-	gian := NewGian(filename)
+	gian := New(filename)
 	all := []byte{}
 	const N = 10
 	b := [4]byte{}
@@ -115,7 +115,7 @@ func TestDetectCorrupt(t *testing.T) {
 	defer os.Remove(filename)
 	defer os.Remove(filename + ".bak")
 
-	gian := NewGian(filename)
+	gian := New(filename)
 	b := [4]byte{}
 	num := uint32(12039485)
 	binary.BigEndian.PutUint32(b[:], num)
@@ -132,7 +132,7 @@ func TestDetectCorrupt(t *testing.T) {
 		panic(err)
 	}
 
-	gian = NewGian(filename)
+	gian = New(filename)
 	if _, err := gian.Read(); err != nil {
 		t.Errorf("MUST BE NO ERR")
 	}
@@ -144,14 +144,14 @@ func TestReadOne(t *testing.T) {
 	defer os.Remove(filename)
 	defer os.Remove(filename + ".bak")
 
-	gian := NewGian(filename)
+	gian := New(filename)
 	b := [4]byte{}
 	num := uint32(12039485)
 	binary.BigEndian.PutUint32(b[:], num)
 	gian.Write(b[:])
 	gian.Close()
 
-	gian = NewGian(filename)
+	gian = New(filename)
 	out, err := gian.Read()
 	if err != nil {
 		return
@@ -173,7 +173,7 @@ func TestReadWriteManySmallx(t *testing.T) {
 	defer os.Remove(filename)
 	defer os.Remove(filename + ".bak")
 
-	gian := NewGian(file.Name())
+	gian := New(file.Name())
 	const N = 1000
 	b := [4]byte{}
 	for i := range N {
@@ -205,7 +205,7 @@ func TestReadFromBrokenFile(t *testing.T) {
 	defer os.Remove(filename)
 	defer os.Remove(filename + ".bak")
 
-	gian := NewGian(file.Name())
+	gian := New(file.Name())
 	const N = 10_000
 
 	for i := range N {
@@ -217,7 +217,7 @@ func TestReadFromBrokenFile(t *testing.T) {
 
 	for r := range 100 {
 		messUpFile(filename)
-		gian = NewGian(filename)
+		gian = New(filename)
 		for i := 0; i < N; i++ {
 			b, err := gian.Read()
 			if err != nil {
@@ -237,7 +237,7 @@ func TestReadWriteManySmallCommit(t *testing.T) {
 	defer os.Remove(file.Name())
 	defer os.Remove(file.Name() + ".bak")
 
-	gian := NewGian(file.Name())
+	gian := New(file.Name())
 	const N = 100000
 	for i := range N {
 		b := [4]byte{}
@@ -276,7 +276,7 @@ func TestReadWriteBig(t *testing.T) {
 	defer os.Remove(file.Name())
 	defer os.Remove(file.Name() + ".bak")
 
-	gian := NewGian(file.Name())
+	gian := New(file.Name())
 	big := []byte{}
 	N := 100000
 	for i := range N {
@@ -328,7 +328,7 @@ func TestReadWriteSmallBigMix(t *testing.T) {
 	defer os.Remove(file.Name())
 	defer os.Remove(file.Name() + ".bak")
 
-	gian := NewGian(file.Name())
+	gian := New(file.Name())
 	const N = 100000
 	for i := range N {
 		b := [4]byte{}
@@ -506,7 +506,7 @@ func TestHealingFromBackup(t *testing.T) {
 	// defer os.Remove(filename)
 	// defer os.Remove(filename + ".bak")
 
-	gian := NewGian(filename)
+	gian := New(filename)
 	N := 10
 	for i := range N {
 		b := [4]byte{}
@@ -524,7 +524,7 @@ func TestHealingFromBackup(t *testing.T) {
 	}
 	gian.Close()
 
-	gian = NewGian(filename)
+	gian = New(filename)
 	N = 100_000
 	for i := range N {
 		b := [4]byte{}
@@ -574,7 +574,7 @@ func TestHealingBackup(t *testing.T) {
 	filename := file.Name()
 	defer os.Remove(filename)
 	defer os.Remove(filename + ".bak")
-	gian := NewGian(filename)
+	gian := New(filename)
 	N := 10000
 	for i := range N {
 		b := [4]byte{}
@@ -626,7 +626,7 @@ func TestWriteToBrokenFile(t *testing.T) {
 	defer os.Remove(file.Name())
 	defer os.Remove(file.Name() + ".bak")
 
-	gian := NewGian(file.Name())
+	gian := New(file.Name())
 	const N = 1000
 	for i := range N {
 		b := [4]byte{}
@@ -636,7 +636,7 @@ func TestWriteToBrokenFile(t *testing.T) {
 	gian.ForceCommit()
 	gian.Close()
 	appendRandom(file.Name(), 10000)
-	gian = NewGian(file.Name())
+	gian = New(file.Name())
 	b := [4]byte{}
 	binary.BigEndian.PutUint32(b[:], uint32(N))
 	gian.Write(b[:])
@@ -679,7 +679,7 @@ func TestWriteToBrokenBackup(t *testing.T) {
 	defer os.Remove(file.Name())
 	defer os.Remove(file.Name() + ".bak")
 
-	gian := NewGian(file.Name())
+	gian := New(file.Name())
 	const N = 1000
 	for i := range N {
 		b := [4]byte{}
@@ -690,7 +690,7 @@ func TestWriteToBrokenBackup(t *testing.T) {
 	gian.Close()
 	appendRandom(file.Name()+".bak", 10000)
 
-	gian = NewGian(file.Name())
+	gian = New(file.Name())
 	b := [4]byte{}
 	binary.BigEndian.PutUint32(b[:], uint32(N))
 	gian.Write(b[:])
@@ -737,7 +737,7 @@ func TestLoadForward(t *testing.T) {
 	filename := file.Name()
 	defer os.Remove(filename)
 	defer os.Remove(filename + ".bak")
-	gian := NewGian(filename)
+	gian := New(filename)
 
 	index, data, _ := ReadFromStart(filename, true)
 	if index != 0 || len(data) != 0 {
@@ -773,7 +773,7 @@ func TestLoadBackward(t *testing.T) {
 	filename := file.Name()
 	defer os.Remove(filename)
 	defer os.Remove(filename + ".bak")
-	gian := NewGian(filename)
+	gian := New(filename)
 
 	pass, data := LoadBackwardToIndex(filename, 0)
 	if pass == false {
@@ -857,7 +857,7 @@ func TestLoadBackward(t *testing.T) {
 	}
 
 	return
-	gian = NewGian(filename)
+	gian = New(filename)
 	N = 1
 	binary.BigEndian.PutUint32(b[:], 113)
 	gian.Write(b[:])
@@ -874,7 +874,7 @@ func TestHealingBothMainAndBackup(t *testing.T) {
 	filename := file.Name()
 	defer os.Remove(filename)
 	defer os.Remove(filename + ".bak")
-	gian := NewGian(filename)
+	gian := New(filename)
 	N := 100
 	for i := range N {
 		b := [4]byte{}

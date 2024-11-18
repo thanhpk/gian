@@ -6,6 +6,7 @@ import (
 	"hash/crc32"
 	"io"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -15,7 +16,7 @@ const ONEGB = 1 * 1024 * 1024 * 1024
 // self healing file
 type Gian struct {
 	dead     bool
-	filepath string
+	filename string
 
 	// writing
 	lastCheckSum   uint32
@@ -33,14 +34,23 @@ type Gian struct {
 	readBuffer        []byte
 }
 
-func NewGian(filepath string) *Gian {
+func New(filename string) *Gian {
+	if filename == "" {
+		file, _ := os.CreateTemp("/tmp", "*.dat")
+		filename = file.Name()
+	}
+
 	me := &Gian{
-		filepath:       filepath,
+		filename:       filename,
 		uncommitBuffer: make([]byte, CHUNKSIZE),
 		readBuffer:     make([]byte, CHUNKSIZE),
 	}
 	go me.autoCommit()
 	return me
+}
+
+func (g *Gian) GetFileName() string {
+	return g.filename
 }
 
 func (g *Gian) Close() error {
@@ -69,55 +79,55 @@ func (g *Gian) Write(data []byte) error {
 }
 
 func (g *Gian) Fix() error {
-	findex, _, fileErr := ReadFromStart(g.filepath, false)
-	bindex, _, bakFileErr := ReadFromStart(g.filepath+".bak", false)
+	findex, _, fileErr := ReadFromStart(g.filename, false)
+	bindex, _, bakFileErr := ReadFromStart(g.filename+".bak", false)
 	if findex == bindex && fileErr == nil && bakFileErr == nil {
 		return nil
 	}
 
 	if findex != bindex && fileErr == nil && bakFileErr == nil {
 		if findex < bindex {
-			return CopyFile(g.filepath, g.filepath+".bak")
+			return CopyFile(g.filename, g.filename+".bak")
 		}
-		return CopyFile(g.filepath+".bak", g.filepath)
+		return CopyFile(g.filename+".bak", g.filename)
 	}
-	headIndex, headdata, _ := ReadFromStart(g.filepath, true)
-	bakheadIndex, bakheaddata, _ := ReadFromStart(g.filepath+".bak", true)
+	headIndex, headdata, _ := ReadFromStart(g.filename, true)
+	bakheadIndex, bakheaddata, _ := ReadFromStart(g.filename+".bak", true)
 	if headIndex < bakheadIndex {
 		headIndex = bakheadIndex
 		headdata = bakheaddata
 	}
 
-	pass, taildata := LoadBackwardToIndex(g.filepath, headIndex)
+	pass, taildata := LoadBackwardToIndex(g.filename, headIndex)
 	if !pass {
-		pass, taildata = LoadBackwardToIndex(g.filepath+".bak", headIndex)
+		pass, taildata = LoadBackwardToIndex(g.filename+".bak", headIndex)
 	}
 	if !pass {
-		return errors.New("cannot fix. " + g.filepath)
+		return errors.New("cannot fix. " + g.filename)
 	}
 
 	fixed := append(headdata, taildata...)
-	if err := os.WriteFile(g.filepath, fixed, 0644); err != nil {
+	if err := os.WriteFile(g.filename, fixed, 0644); err != nil {
 		return err
 	}
-	if err := os.WriteFile(g.filepath+".bak", fixed, 0644); err != nil {
+	if err := os.WriteFile(g.filename+".bak", fixed, 0644); err != nil {
 		return err
 	}
 
-	findex, _, fileErr = ReadFromStart(g.filepath, false)
-	bindex, _, bakFileErr = ReadFromStart(g.filepath+".bak", false)
+	findex, _, fileErr = ReadFromStart(g.filename, false)
+	bindex, _, bakFileErr = ReadFromStart(g.filename+".bak", false)
 	if findex == bindex && fileErr == nil && bakFileErr == nil {
 		return nil
 	}
 
 	if findex != bindex && fileErr == nil && bakFileErr == nil {
 		if findex > bindex {
-			return CopyFile(g.filepath, g.filepath+".bak")
+			return CopyFile(g.filename, g.filename+".bak")
 		}
-		return CopyFile(g.filepath+".bak", g.filepath)
+		return CopyFile(g.filename+".bak", g.filename)
 	}
 
-	return errors.New("cannot fix.." + g.filepath)
+	return errors.New("cannot fix.." + g.filename)
 }
 
 func (g *Gian) autoCommit() {
@@ -155,14 +165,23 @@ func mustInsync(f1, f2 string) error {
 }
 
 func (g *Gian) commit(data []byte) error {
+
 	if !g.loaded {
-		if err := mustInsync(g.filepath, g.filepath+".bak"); err != nil {
+		paths := strings.Split(g.filename, "/")
+		if len(paths) > 1 {
+			dir := strings.Join(paths[:len(paths)-1], "/")
+			if err := os.MkdirAll(dir, os.ModePerm); err != nil {
+				return err
+			}
+		}
+
+		if err := mustInsync(g.filename, g.filename+".bak"); err != nil {
 			if err := g.Fix(); err != nil {
 				return err
 			}
 		}
 
-		file, err := os.OpenFile(g.filepath, os.O_RDONLY, 0644)
+		file, err := os.OpenFile(g.filename, os.O_RDONLY, 0644)
 		if err != nil {
 			return err
 		}
@@ -207,12 +226,12 @@ func (g *Gian) commit(data []byte) error {
 		return nil
 	}
 
-	file, err := os.OpenFile(g.filepath, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0644)
+	file, err := os.OpenFile(g.filename, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0644)
 	if err != nil {
 		return err
 	}
 
-	bakfile, err := os.OpenFile(g.filepath+".bak", os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0644)
+	bakfile, err := os.OpenFile(g.filename+".bak", os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0644)
 	if err != nil {
 		return err
 	}
@@ -271,14 +290,14 @@ func (g *Gian) ForceCommit() error {
 }
 
 func (g *Gian) openFile() error {
-	f, err := os.Open(g.filepath)
+	f, err := os.Open(g.filename)
 	if err != nil && !os.IsNotExist(err) {
 		return err
 		// log.Err("subiz", err, "CANNOT READ INDEXFIE", indexfile)
 	}
 
 	if f == nil {
-		f, err = os.OpenFile(g.filepath, os.O_RDONLY|os.O_CREATE, 0644)
+		f, err = os.OpenFile(g.filename, os.O_RDONLY|os.O_CREATE, 0644)
 		if err != nil {
 			return err
 			// return log.EServer(err, log.M{"account_id": accid, "collection": col, "db": db, "filename": filename})
@@ -300,9 +319,9 @@ func (g *Gian) fixThenRead(reason string) ([]byte, error) {
 	return g.Read()
 }
 
-func ReadFromStart(filepath string, readdata bool) (int, []byte, error) {
+func ReadFromStart(filename string, readdata bool) (int, []byte, error) {
 	out := []byte{}
-	file, err := os.Open(filepath)
+	file, err := os.Open(filename)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -385,8 +404,8 @@ func ReadFromStart(filepath string, readdata bool) (int, []byte, error) {
 
 // the return data do not include headIndex
 // (headIndex...end]
-func LoadBackwardToIndex(filepath string, headIndex int) (bool, []byte) {
-	file, err := os.OpenFile(filepath, os.O_RDONLY, 0644)
+func LoadBackwardToIndex(filename string, headIndex int) (bool, []byte) {
+	file, err := os.OpenFile(filename, os.O_RDONLY, 0644)
 	if err != nil {
 		return false, nil
 	}
@@ -557,6 +576,19 @@ func (g *Gian) readToIndex(toindex int) error {
 			return nil // ok
 		}
 	}
+}
+
+func (g *Gian) Rename(newname string) error {
+	paths := strings.Split(newname, "/")
+	if len(paths) > 1 {
+		dir := strings.Join(paths[:len(paths)-1], "/")
+		if err := os.MkdirAll(dir, os.ModePerm); err != nil {
+			return err
+		}
+	}
+
+	os.Remove(g.filename)
+	return os.Rename(newname, g.filename)
 }
 
 func (g *Gian) ReadAll() ([]byte, error) {
