@@ -588,8 +588,8 @@ func (g *Gian) Rename(newname string) error {
 		}
 	}
 
-	os.Remove(g.filename)
-	return os.Rename(newname, g.filename)
+	os.Remove(newname)
+	return os.Rename(g.filename, newname)
 }
 
 func (g *Gian) ReadAll() ([]byte, error) {
