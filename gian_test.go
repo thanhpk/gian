@@ -78,6 +78,37 @@ func TestReadFromUncommit(t *testing.T) {
 	}
 }
 
+func TestReadAll(t *testing.T) {
+	file, _ := os.CreateTemp("/tmp", "gian_*.dat")
+	filename := file.Name()
+	defer os.Remove(filename)
+	defer os.Remove(filename + ".bak")
+
+	gian := NewGian(filename)
+	all := []byte{}
+	const N = 10
+	b := [4]byte{}
+
+	for i := range N {
+		binary.BigEndian.PutUint32(b[:], uint32(i+1))
+		gian.Write(b[:])
+		all = append(append([]byte{}, b[:]...), all...)
+		gian.ForceCommit()
+	}
+	binary.BigEndian.PutUint32(b[:], uint32(N))
+	gian.Write(b[:])
+	all = append(append([]byte{}, b[:]...), all...)
+
+	out, err := gian.ReadAll()
+	if err != nil {
+		panic(err)
+	}
+
+	if !bytes.Equal(out, all) {
+		t.Errorf("SHOULD EQ\n%x\n%x", out, all)
+	}
+}
+
 func TestDetectCorrupt(t *testing.T) {
 	file, _ := os.CreateTemp("/tmp", "gian_*.dat")
 	filename := file.Name()

@@ -559,6 +559,30 @@ func (g *Gian) readToIndex(toindex int) error {
 	}
 }
 
+func (g *Gian) ReadAll() ([]byte, error) {
+	out := []byte{}
+	for {
+		data, err := g.Read()
+		if err == io.EOF {
+			break
+		}
+
+		if err != nil {
+			return out, err
+		}
+
+		out = append(out, data...)
+	}
+	return out, nil
+}
+
+func (g *Gian) Reset() {
+	if g.file != nil {
+		g.file.Close()
+		g.file = nil
+	}
+}
+
 func (g *Gian) Read() ([]byte, error) {
 	if g.file == nil {
 		g.openFile()
