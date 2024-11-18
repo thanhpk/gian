@@ -43,7 +43,7 @@ func TestLayout(t *testing.T) {
 	if !bytes.Equal(dat, mustbe) {
 		t.Errorf("SHOULDBEEQ, %v, %v, \n%x\n%x", len(dat), len(mustbe), dat, mustbe)
 	}
-	if err := gian.Validate(filename); err != nil {
+	if _, _, err := ReadFromStart(filename, false); err != nil {
 		t.Errorf("MUST BE TRUE %v", err)
 	}
 }
@@ -131,7 +131,7 @@ func TestReadOne(t *testing.T) {
 		t.Errorf("SHOULDEQ, got %d, want %d", num2, num)
 	}
 
-	if err := gian.Validate(filename); err != nil {
+	if _, _, err := ReadFromStart(filename, false); err != nil {
 		t.Errorf("MUST BE TRUE %v", err)
 	}
 }
@@ -163,7 +163,7 @@ func TestReadWriteManySmallx(t *testing.T) {
 		}
 	}
 
-	if err := gian.Validate(filename); err != nil {
+	if _, _, err := ReadFromStart(filename, false); err != nil {
 		t.Errorf("MUST BE TRUE %v", err)
 	}
 }
@@ -235,7 +235,7 @@ func TestReadWriteManySmallCommit(t *testing.T) {
 		}
 	}
 
-	if err := gian.Validate(file.Name()); err != nil {
+	if _, _, err := ReadFromStart(file.Name(), false); err != nil {
 		t.Errorf("MUST BE TRUE %v", err)
 	}
 }
@@ -287,7 +287,7 @@ func TestReadWriteBig(t *testing.T) {
 		}
 	}
 
-	if err := gian.Validate(file.Name()); err != nil {
+	if _, _, err := ReadFromStart(file.Name(), false); err != nil {
 		t.Errorf("MUST BE TRUE %v", err)
 	}
 }
@@ -341,7 +341,7 @@ func TestReadWriteSmallBigMix(t *testing.T) {
 			t.Errorf("SHOULDEQ, got %d, want %d", i32, i)
 		}
 	}
-	if err := gian.Validate(file.Name()); err != nil {
+	if _, _, err := ReadFromStart(file.Name(), false); err != nil {
 		t.Errorf("MUST BE TRUE %v", err)
 	}
 }
@@ -417,7 +417,11 @@ func cutFileHead(filename string, length int) {
 		}
 	}
 
-	dat = dat[length:]
+	if len(dat) < length {
+		dat = []byte{}
+	} else {
+		dat = dat[length:]
+	}
 	if err := os.WriteFile(filename, dat, 0x777); err != nil {
 		panic(err)
 	}
@@ -435,7 +439,11 @@ func cutFileTail(filename string, length int) {
 		}
 	}
 
-	dat = dat[:len(dat)-length]
+	if len(dat)-length < 0 {
+		dat = []byte{}
+	} else {
+		dat = dat[:len(dat)-length]
+	}
 	if err := os.WriteFile(filename, dat, 0x777); err != nil {
 		panic(err)
 	}
@@ -464,10 +472,11 @@ func appendRandom(filename string, length int) {
 func TestHealingFromBackup(t *testing.T) {
 	file, _ := os.CreateTemp("", "*.dat")
 	filename := file.Name()
-	defer os.Remove(filename)
-	defer os.Remove(filename + ".bak")
+	// defer os.Remove(filename)
+	// defer os.Remove(filename + ".bak")
+
 	gian := NewGian(filename)
-	N := 10000
+	N := 10
 	for i := range N {
 		b := [4]byte{}
 		binary.BigEndian.PutUint32(b[:], uint32(i))
@@ -475,6 +484,24 @@ func TestHealingFromBackup(t *testing.T) {
 	}
 	gian.ForceCommit()
 	cs := checkSumFile(filename + ".bak")
+	cutFileHead(filename, 100)
+	if err := gian.Fix(); err != nil {
+		panic(err)
+	}
+	if checkSumFile(filename) != cs {
+		t.Errorf("MUST HEAL %s, %s, %s", checkSumFile(filename), cs, checkSumFile(filename+".bak"))
+	}
+	gian.Close()
+
+	gian = NewGian(filename)
+	N = 100_000
+	for i := range N {
+		b := [4]byte{}
+		binary.BigEndian.PutUint32(b[:], uint32(i))
+		gian.Write(b[:])
+	}
+	gian.ForceCommit()
+	cs = checkSumFile(filename + ".bak")
 	os.Remove(filename) // remove file
 	if err := gian.Fix(); err != nil {
 		panic(err)
@@ -483,14 +510,13 @@ func TestHealingFromBackup(t *testing.T) {
 	if checkSumFile(filename) != cs {
 		t.Errorf("MUST HEAL")
 	}
-
 	cutFileHead(filename, 100)
 	if err := gian.Fix(); err != nil {
 		panic(err)
 	}
 
 	if checkSumFile(filename) != cs {
-		t.Errorf("MUST HEAL")
+		t.Errorf("MUST HEAL %s, %s, %s", checkSumFile(filename), cs, checkSumFile(filename+".bak"))
 	}
 
 	messUpFile(filename)
@@ -508,7 +534,7 @@ func TestHealingFromBackup(t *testing.T) {
 	}
 
 	if checkSumFile(filename) != cs {
-		t.Errorf("MUST HEAL")
+		t.Errorf("MUST HEAL %s  %s  %s", checkSumFile(filename), cs, checkSumFile(filename+".bak"))
 	}
 }
 
@@ -612,7 +638,65 @@ func TestWriteToBrokenFile(t *testing.T) {
 		}
 	}
 
-	if err := gian.Validate(file.Name()); err != nil {
+	if _, _, err := ReadFromStart(file.Name(), false); err != nil {
+		t.Errorf("MUST BE TRUE %v", err)
+	}
+}
+
+func TestWriteToBrokenBackup(t *testing.T) {
+	file, _ := os.CreateTemp("", "*.dat")
+	defer os.Remove(file.Name())
+	defer os.Remove(file.Name() + ".bak")
+
+	gian := NewGian(file.Name())
+	const N = 1000
+	for i := range N {
+		b := [4]byte{}
+		binary.BigEndian.PutUint32(b[:], uint32(i))
+		gian.Write(b[:])
+	}
+	gian.ForceCommit()
+	gian.Close()
+	appendRandom(file.Name()+".bak", 10000)
+
+	gian = NewGian(file.Name())
+	b := [4]byte{}
+	binary.BigEndian.PutUint32(b[:], uint32(N))
+	gian.Write(b[:])
+	gian.ForceCommit()
+
+	if checkSumFile(file.Name()) != checkSumFile(file.Name()+".bak") {
+		t.Errorf("MUST HEAL")
+	}
+
+	out, err := gian.Read()
+	if err != nil {
+		panic(err)
+	}
+	if !bytes.Equal(b[:], out[:]) {
+		t.Errorf("MUST EQ, got %x, want %x", out, b)
+	}
+	out = []byte{}
+	for {
+		b, err := gian.Read()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			panic(err)
+		}
+		tmp := append([]byte{}, b...)
+		out = append(tmp, out...)
+	}
+
+	for i := 0; i < N; i++ {
+		i32 := binary.BigEndian.Uint32(out[i*4 : i*4+4])
+		if i != int(i32) {
+			t.Errorf("SHOULDEQ, got %d, want %d", i32, i)
+		}
+	}
+
+	if _, _, err := ReadFromStart(file.Name(), false); err != nil {
 		t.Errorf("MUST BE TRUE %v", err)
 	}
 }
@@ -624,7 +708,7 @@ func TestLoadForward(t *testing.T) {
 	defer os.Remove(filename + ".bak")
 	gian := NewGian(filename)
 
-	index, data := LoadForward(filename)
+	index, data, _ := ReadFromStart(filename, true)
 	if index != 0 || len(data) != 0 {
 		t.Errorf("SHOULD BE 0")
 	}
@@ -643,7 +727,7 @@ func TestLoadForward(t *testing.T) {
 	}
 
 	appendRandom(filename, 100)
-	index, data = LoadForward(filename)
+	index, data, _ = ReadFromStart(filename, true)
 	if !bytes.Equal(originb, data) {
 		t.Errorf("SHOULD EQ.\n%x\n%x", originb, data)
 	}
@@ -683,9 +767,13 @@ func TestLoadBackward(t *testing.T) {
 		t.Errorf("SHOULD BE TRUE")
 	}
 
-	pass, _ = LoadBackwardToIndex(filename, N)
+	pass, data = LoadBackwardToIndex(filename, N)
 	if !pass {
 		t.Errorf("SHOULD BE TRUE")
+	}
+
+	if len(data) > 0 {
+		t.Errorf("SHOULD BE ZERO GOT %d", len(data))
 	}
 
 	originb, err := os.ReadFile(filename)
@@ -696,6 +784,11 @@ func TestLoadBackward(t *testing.T) {
 
 	cutFileHead(filename, 2)
 	pass, _ = LoadBackwardToIndex(filename, 1)
+	if !pass {
+		t.Errorf("SHOULD BE TRUE")
+	}
+
+	pass, _ = LoadBackwardToIndex(filename, 0)
 	if pass {
 		t.Errorf("SHOULD BE FALSE")
 	}
@@ -715,21 +808,33 @@ func TestLoadBackward(t *testing.T) {
 		0x00, 0x00, 0x00, 0x04,
 		0x00, 0x00, 0x00, 0x03,
 		0x00, 0x00, 0x00, 0x04,
-		0x9b, 0x0a,0x56, 0xe7,
+		0x9b, 0x0a, 0x56, 0xe7,
 		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05,
 		0x00, 0x00, 0x00, 0x04,
 		0x00, 0x00, 0x00, 0x04,
 		0x00, 0x00, 0x00, 0x04,
-		0x6d, 0x34, 0x85 , 0x3c,
+		0x6d, 0x34, 0x85, 0x3c,
 	}
 
-	pass, data = LoadBackwardToIndex(filename, 2)
+	pass, data = LoadBackwardToIndex(filename, 1)
 	if !pass {
 		t.Errorf("SHOULD BE TRUE")
 	}
 
 	if !bytes.Equal(data, expect) {
 		t.Errorf("SHOULD EQ\n%x\n%x\n%x", data, expect, originb[24:])
+	}
+
+	return
+	gian = NewGian(filename)
+	N = 1
+	binary.BigEndian.PutUint32(b[:], 113)
+	gian.Write(b[:])
+	gian.Close()
+
+	pass, data = LoadBackwardToIndex(filename, 1)
+	if !pass {
+		t.Errorf("SHOULD BE TRUE")
 	}
 }
 
@@ -747,15 +852,15 @@ func TestHealingBothMainAndBackup(t *testing.T) {
 		gian.ForceCommit()
 	}
 
-		cutFileHead(filename, 40)
-		cutFileTail(filename+".bak", 10)
-		if err := gian.Fix(); err != nil {
-			panic(err)
-		}
+	cutFileHead(filename, 40)
+	cutFileTail(filename+".bak", 10)
+	if err := gian.Fix(); err != nil {
+		panic(err)
+	}
 
-		if checkSumFile(filename) != checkSumFile(filename+".bak") {
-			t.Errorf("MUST HEAL")
-		}
+	if checkSumFile(filename) != checkSumFile(filename+".bak") {
+		t.Errorf("MUST HEAL")
+	}
 
 	cutFileHead(filename+".bak", 40)
 	cutFileTail(filename, 50)

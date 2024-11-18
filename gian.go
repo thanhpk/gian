@@ -3,7 +3,6 @@ package gian
 import (
 	"encoding/binary"
 	"errors"
-	"fmt"
 	"hash/crc32"
 	"io"
 	"os"
@@ -35,13 +34,10 @@ type Gian struct {
 }
 
 func NewGian(filepath string) *Gian {
-	fmt.Println("NEW", filepath)
 	me := &Gian{
 		filepath:       filepath,
 		uncommitBuffer: make([]byte, CHUNKSIZE),
-
-		lastReadIndex: 0,
-		readBuffer:    make([]byte, CHUNKSIZE),
+		readBuffer:     make([]byte, CHUNKSIZE),
 	}
 	go me.autoCommit()
 	return me
@@ -72,129 +68,56 @@ func (g *Gian) Write(data []byte) error {
 	return nil
 }
 
-func (g *Gian) Validate(filepath string) error {
-	file, err := os.Open(filepath)
-	if err != nil {
-		return err
-	}
-
-	lastIndex := 0
-	crc := crc32.NewIEEE()
-	checksumb := [4]byte{}
-	lastChecksumB := [4]byte{}
-	indexb := [8]byte{}
-	lenb := [4]byte{}
-	data := make([]byte, 4096)
-	for {
-		crc.Reset()
-		_, err := file.Read(indexb[:])
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return err
-		}
-		crc.Write(lastChecksumB[:])
-		crc.Write(indexb[:])
-
-		index := int(binary.BigEndian.Uint64(indexb[:]))
-		if index != lastIndex+1 {
-			return errors.New("wrong index")
-		}
-		lastIndex = index
-
-		if _, err := file.Read(lenb[:]); err != nil {
-			return err
-		}
-		crc.Write(lenb[:])
-
-		l := binary.BigEndian.Uint32(lenb[:])
-		if l > ONEGB { // 1GB {
-			// wrong length -> broken file
-			return errors.New("wrong length 3")
-		}
-
-		if int(l) > len(data) {
-			data = make([]byte, int(l))
-		}
-		n, err := file.Read(data[:l])
-		if err != nil {
-			return err
-		}
-		if n != int(l) {
-			return errors.New("wrong len")
-		}
-
-		crc.Write(data[:l])
-		crc.Write(lenb[:])
-		if _, err := file.Read(lenb[:]); err != nil {
-			return err
-		}
-		l2 := binary.BigEndian.Uint32(lenb[:])
-		if l2 != l { // 1GB {
-			return errors.New("wrong length")
-		}
-
-		if _, err := file.Read(checksumb[:]); err != nil {
-			return err
-		}
-
-		checksum := binary.BigEndian.Uint32(checksumb[:])
-		if checksum != crc.Sum32() {
-			return errors.New("wrong check sum")
-		}
-		copy(lastChecksumB[:], checksumb[:])
-	}
-
-	return nil
-}
-
-// force fix
 func (g *Gian) Fix() error {
-	fileErr := g.Validate(g.filepath)
-	bakFileErr := g.Validate(g.filepath + ".bak")
-	if fileErr == nil && bakFileErr == nil {
+	findex, _, fileErr := ReadFromStart(g.filepath, false)
+	bindex, _, bakFileErr := ReadFromStart(g.filepath+".bak", false)
+	if findex == bindex && fileErr == nil && bakFileErr == nil {
 		return nil
 	}
 
-	if fileErr == nil && bakFileErr != nil {
+	if findex != bindex && fileErr == nil && bakFileErr == nil {
+		if findex < bindex {
+			return CopyFile(g.filepath, g.filepath+".bak")
+		}
 		return CopyFile(g.filepath+".bak", g.filepath)
 	}
-
-	if fileErr != nil && bakFileErr == nil {
-		return CopyFile(g.filepath, g.filepath+".bak")
-	}
-
-	headIndex, headdata := LoadForward(g.filepath)
-	bakheadIndex, bakheaddata := LoadForward(g.filepath + ".bak")
+	headIndex, headdata, _ := ReadFromStart(g.filepath, true)
+	bakheadIndex, bakheaddata, _ := ReadFromStart(g.filepath+".bak", true)
 	if headIndex < bakheadIndex {
 		headIndex = bakheadIndex
 		headdata = bakheaddata
 	}
 
 	pass, taildata := LoadBackwardToIndex(g.filepath, headIndex)
-
 	if !pass {
 		pass, taildata = LoadBackwardToIndex(g.filepath+".bak", headIndex)
 	}
 	if !pass {
-		return errors.New("cannot fix." + g.filepath)
+		return errors.New("cannot fix. " + g.filepath)
 	}
 
 	fixed := append(headdata, taildata...)
-	if err := os.WriteFile(g.filepath, fixed, 0x777); err != nil {
+	if err := os.WriteFile(g.filepath, fixed, 0644); err != nil {
 		return err
 	}
-	if err := os.WriteFile(g.filepath+".bak", fixed, 0x777); err != nil {
+	if err := os.WriteFile(g.filepath+".bak", fixed, 0644); err != nil {
 		return err
 	}
 
-	fileErr = g.Validate(g.filepath)
-	bakFileErr = g.Validate(g.filepath + ".bak")
-	if fileErr == nil && bakFileErr == nil {
+	findex, _, fileErr = ReadFromStart(g.filepath, false)
+	bindex, _, bakFileErr = ReadFromStart(g.filepath+".bak", false)
+	if findex == bindex && fileErr == nil && bakFileErr == nil {
 		return nil
 	}
-	return errors.New("cannot fix." + g.filepath)
+
+	if findex != bindex && fileErr == nil && bakFileErr == nil {
+		if findex > bindex {
+			return CopyFile(g.filepath, g.filepath+".bak")
+		}
+		return CopyFile(g.filepath+".bak", g.filepath)
+	}
+
+	return errors.New("cannot fix.." + g.filepath)
 }
 
 func (g *Gian) autoCommit() {
@@ -207,9 +130,33 @@ func (g *Gian) autoCommit() {
 	}
 }
 
+func mustInsync(f1, f2 string) error {
+	i1, _, err1 := ReadFromStart(f1, false)
+	i2, _, err2 := ReadFromStart(f2, false)
+
+	if err1 != nil {
+		if i2 == 0 {
+			return nil
+		}
+		return err1
+	}
+
+	if err2 != nil {
+		if i1 == 0 {
+			return nil
+		}
+		return err2
+	}
+	if i1 == i2 {
+		return nil
+	}
+
+	return errors.New("backup and bin not in sync")
+}
+
 func (g *Gian) commit(data []byte) error {
 	if !g.loaded {
-		if err := g.Validate(g.filepath); err != nil {
+		if err := mustInsync(g.filepath, g.filepath+".bak"); err != nil {
 			if err := g.Fix(); err != nil {
 				return err
 			}
@@ -353,11 +300,11 @@ func (g *Gian) fixThenRead(reason string) ([]byte, error) {
 	return g.Read()
 }
 
-func LoadForward(filepath string) (int, []byte) {
+func ReadFromStart(filepath string, readdata bool) (int, []byte, error) {
 	out := []byte{}
 	file, err := os.Open(filepath)
 	if err != nil {
-		return 0, nil
+		return 0, nil, err
 	}
 	defer file.Close()
 	lastIndex := 0
@@ -374,26 +321,23 @@ func LoadForward(filepath string) (int, []byte) {
 			break
 		}
 		if err != nil {
-			return lastIndex, out
+			return lastIndex, out, err
 		}
 		crc.Write(lastChecksumB[:])
 		crc.Write(indexb[:])
-
 		index := int(binary.BigEndian.Uint64(indexb[:]))
-		if index != lastIndex+1 {
-			return lastIndex, out
-		}
-		lastIndex = index
 
+		if index != lastIndex+1 {
+			return lastIndex, out, errors.New("wrong index 234908234")
+		}
 		if _, err := file.Read(lenb[:]); err != nil {
-			return lastIndex, out
+			return lastIndex, out, err
 		}
 		crc.Write(lenb[:])
 
 		l := binary.BigEndian.Uint32(lenb[:])
 		if l > ONEGB { // 1GB {
-			// wrong length -> broken file
-			return lastIndex, out
+			return lastIndex, out, errors.New("wrong length 3")
 		}
 
 		if int(l) > len(data) {
@@ -401,47 +345,47 @@ func LoadForward(filepath string) (int, []byte) {
 		}
 		n, err := file.Read(data[:l])
 		if err != nil {
-			return lastIndex, out
+			return lastIndex, out, err
 		}
 		if n != int(l) {
-			return lastIndex, out
+			return lastIndex, out, err
 		}
 
 		crc.Write(data[:l])
 		crc.Write(lenb[:])
 		if _, err := file.Read(lenb[:]); err != nil {
-			return lastIndex, out
+			return lastIndex, out, err
 		}
 		l2 := binary.BigEndian.Uint32(lenb[:])
 		if l2 != l { // 1GB {
-			return lastIndex, out
+			return lastIndex, out, errors.New("wrong len")
 		}
 
 		if _, err := file.Read(checksumb[:]); err != nil {
-			return lastIndex, out
+			return lastIndex, out, err
 		}
 
 		checksum := binary.BigEndian.Uint32(checksumb[:])
 		if checksum != crc.Sum32() {
-			return lastIndex, out
+			return lastIndex, out, errors.New("wrong check sum")
 		}
-
-		out = append(out, indexb[:]...)
-		out = append(out, lenb[:]...)
-		out = append(out, data[:l]...)
-		out = append(out, lenb[:]...)
-		out = append(out, checksumb[:]...)
+		lastIndex = index
+		if readdata {
+			out = append(out, indexb[:]...)
+			out = append(out, lenb[:]...)
+			out = append(out, data[:l]...)
+			out = append(out, lenb[:]...)
+			out = append(out, checksumb[:]...)
+		}
 		copy(lastChecksumB[:], checksumb[:])
 	}
 
-	return lastIndex, out
+	return lastIndex, out, nil
 }
 
-func LoadBackwardToIndex(filepath string, _headIndex int) (bool, []byte) {
-	headIndex := _headIndex
-	if headIndex <= 1 {
-		headIndex = 1
-	}
+// the return data do not include headIndex
+// (headIndex...end]
+func LoadBackwardToIndex(filepath string, headIndex int) (bool, []byte) {
 	file, err := os.OpenFile(filepath, os.O_RDONLY, 0644)
 	if err != nil {
 		return false, nil
@@ -459,7 +403,7 @@ func LoadBackwardToIndex(filepath string, _headIndex int) (bool, []byte) {
 	var lastReadIndex int
 
 	_, err = rr.Read(checksumb[:])
-	if err == io.EOF && _headIndex == 0 {
+	if err == io.EOF && headIndex == 0 {
 		return true, nil
 	}
 	if err != nil && err != io.EOF {
@@ -467,35 +411,38 @@ func LoadBackwardToIndex(filepath string, _headIndex int) (bool, []byte) {
 	}
 	for {
 		if _, err := rr.Read(lenb[:]); err != nil {
-			return false, nil
+			break
 		}
 		l := binary.BigEndian.Uint32(lenb[:])
 		if l > ONEGB { // 1GB {
-			return false, nil
+			break
 		}
 		if int(l) > len(readBuffer) {
 			readBuffer = make([]byte, l)
 		}
 		if _, err := rr.Read(readBuffer[:l]); err != nil {
-			return false, nil
+			break
 		}
 
 		if n, err := rr.Read(lenb[:]); err != nil || n != 4 {
-			return false, nil
+			break
 		}
 
 		l2 := binary.BigEndian.Uint32(lenb[:])
 		if l2 != l {
-			return false, nil
+			break
 		}
 
 		if n, err := rr.Read(indexb[:]); err != nil || n != 8 {
-			return false, nil
+			break
 		}
 
 		index := int(binary.BigEndian.Uint64(indexb[:]))
 		data := readBuffer[0:l]
 
+		if index <= headIndex {
+			break
+		}
 		// do check sum
 		if index > 1 {
 			if _, err := rr.Read(prevchecksumb[:]); err != nil {
@@ -538,7 +485,7 @@ func LoadBackwardToIndex(filepath string, _headIndex int) (bool, []byte) {
 		}
 	}
 
-	if lastReadIndex == headIndex {
+	if lastReadIndex <= headIndex+1 {
 		res := []byte{}
 		for i := len(out) - 1; i >= 0; i-- {
 			res = append(res, out[i]...)
