@@ -1,6 +1,7 @@
 package gian
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"hash/crc32"
@@ -293,17 +294,12 @@ func (g *Gian) ForceCommit() error {
 }
 
 func (g *Gian) openFile() error {
-
 	makeSurePath(g.filename)
-
 	f, err := os.OpenFile(g.filename, os.O_RDONLY|os.O_CREATE, 0644)
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
 
-	if f == nil {
-		panic("wtf" + err.Error())
-	}
 	g.file = f
 	g.rr = NewRReaderSize(f, CHUNKSIZE)
 	return nil
@@ -617,9 +613,23 @@ func (g *Gian) Read() ([]byte, error) {
 		if err := g.openFile(); err != nil {
 			return nil, err
 		}
+
 		// read first checksum
-		if _, err := g.rr.Read(g.lastReadCheckSumB[:]); err != nil {
+		g.rr.Read(g.lastReadCheckSumB[:])
+		bakf, err := os.OpenFile(g.filename+".bak", os.O_RDONLY|os.O_CREATE, 0644)
+		if err != nil && !os.IsNotExist(err) {
 			return nil, err
+		}
+		bakrr := NewRReaderSize(bakf, CHUNKSIZE)
+		// read first checksum
+		bakcsb := [4]byte{}
+		bakrr.Read(bakcsb[:])
+		if !bytes.Equal(bakcsb[:], g.lastReadCheckSumB[:]) {
+			if err := g.Fix(); err != nil {
+				return nil, err
+			}
+			g.file = nil
+			return g.Read()
 		}
 
 		if g.uncommitLength > 0 {

@@ -199,6 +199,36 @@ func TestReadWriteManySmallx(t *testing.T) {
 	}
 }
 
+func TestReadFromBrokenFileMissing(t *testing.T) {
+	file, _ := os.CreateTemp("", "*.dat")
+	filename := file.Name()
+	defer os.Remove(filename)
+	defer os.Remove(filename + ".bak")
+
+	gian := New(file.Name())
+	const N = 10_000
+
+	for i := range N {
+		b := [4]byte{}
+		binary.BigEndian.PutUint32(b[:], uint32(i))
+		gian.Write(b[:])
+		gian.ForceCommit()
+	}
+
+	os.Remove(filename) // remove file
+	for i := range N {
+		b, err := gian.Read()
+		if err != nil {
+			t.Errorf("ERR %d %v", i, err)
+			return
+		}
+		readi := binary.BigEndian.Uint32(b[:])
+		if int(readi) != N-i-1 {
+			t.Errorf("SHOULDEQ got %d, want %d", readi, N-i-1)
+		}
+	}
+}
+
 func TestReadFromBrokenFile(t *testing.T) {
 	file, _ := os.CreateTemp("", "*.dat")
 	filename := file.Name()
@@ -503,8 +533,8 @@ func appendRandom(filename string, length int) {
 func TestHealingFromBackup(t *testing.T) {
 	file, _ := os.CreateTemp("", "*.dat")
 	filename := file.Name()
-	// defer os.Remove(filename)
-	// defer os.Remove(filename + ".bak")
+	defer os.Remove(filename)
+	defer os.Remove(filename + ".bak")
 
 	gian := New(filename)
 	N := 10
