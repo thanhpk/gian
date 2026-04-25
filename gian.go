@@ -9,6 +9,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/thanhpk/vdisk"
 )
 
 var CHUNKSIZE = 4096 // 4kb
@@ -27,12 +29,17 @@ type Gian struct {
 	uncommitLength int
 	uncommitBuffer []byte
 
+	wfile    *os.File
+	wbakfile *os.File
+
 	// reading
-	file              *os.File
+	rfile             *vdisk.File
 	rr                *RReader
 	lastReadCheckSumB [4]byte
 	lastReadIndex     int
 	readBuffer        []byte
+
+	limitReadMbs float64
 }
 
 func New(filename string) *Gian {
@@ -45,8 +52,17 @@ func New(filename string) *Gian {
 		filename:       filename,
 		uncommitBuffer: make([]byte, CHUNKSIZE),
 		readBuffer:     make([]byte, CHUNKSIZE),
+		limitReadMbs:   100_000, //  ~ 100Gbs/s -> no limit
 	}
 	go me.autoCommit()
+	return me
+}
+
+func NewWithReadLimit(filename string, limitReadMbs float64) *Gian {
+	me := New(filename)
+	if limitReadMbs > 0 {
+		me.limitReadMbs = limitReadMbs
+	}
 	return me
 }
 
@@ -56,8 +72,8 @@ func (g *Gian) GetFileName() string {
 
 func (g *Gian) Close() error {
 	err := g.ForceCommit()
-	if g.file != nil {
-		g.file.Close()
+	if g.rfile != nil {
+		g.rfile.Close()
 	}
 	g.dead = true
 	return err
@@ -230,14 +246,20 @@ func (g *Gian) commit(data []byte) error {
 		return nil
 	}
 
-	file, err := os.OpenFile(g.filename, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0644)
-	if err != nil {
-		return err
+	if g.wfile == nil {
+		file, err := os.OpenFile(g.filename, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0644)
+		if err != nil {
+			return err
+		}
+		g.wfile = file
 	}
 
-	bakfile, err := os.OpenFile(g.filename+".bak", os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0644)
-	if err != nil {
-		return err
+	if g.wbakfile == nil {
+		bakfile, err := os.OpenFile(g.filename+".bak", os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0644)
+		if err != nil {
+			return err
+		}
+		g.wbakfile = bakfile
 	}
 
 	lastchecksumb := [4]byte{}
@@ -260,25 +282,25 @@ func (g *Gian) commit(data []byte) error {
 	binary.BigEndian.PutUint32(checksumB[:], checksum)
 
 	// [ N ] [ Length ] [ --- data ---- ] [ Length ] [ CHECKSUM ]
-	file.Write(indexB[:])
-	bakfile.Write(indexB[:])
+	g.wfile.Write(indexB[:])
+	g.wbakfile.Write(indexB[:])
 
-	file.Write(lengthB[:])
-	bakfile.Write(lengthB[:])
+	g.wfile.Write(lengthB[:])
+	g.wbakfile.Write(lengthB[:])
 
-	file.Write(data[:])
-	bakfile.Write(data[:])
+	g.wfile.Write(data[:])
+	g.wbakfile.Write(data[:])
 
-	file.Write(lengthB[:])
-	bakfile.Write(lengthB[:])
+	g.wfile.Write(lengthB[:])
+	g.wbakfile.Write(lengthB[:])
 
-	file.Write(checksumB[:])
-	bakfile.Write(checksumB[:])
+	g.wfile.Write(checksumB[:])
+	g.wbakfile.Write(checksumB[:])
 
 	g.lastWriteIndex++
 	g.lastCheckSum = checksum
-	file.Close()
-	bakfile.Close()
+	// file.Close()
+	// bakfile.Close()
 	return nil
 }
 
@@ -295,12 +317,12 @@ func (g *Gian) ForceCommit() error {
 
 func (g *Gian) openFile() error {
 	makeSurePath(g.filename)
-	f, err := os.OpenFile(g.filename, os.O_RDONLY|os.O_CREATE, 0644)
+	f, err := vdisk.NewLimiter(g.limitReadMbs).OpenFile(g.filename, os.O_RDONLY|os.O_CREATE, 0644)
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
 
-	g.file = f
+	g.rfile = f
 	g.rr = NewRReaderSize(f, CHUNKSIZE)
 	return nil
 }
@@ -309,7 +331,7 @@ func (g *Gian) fixThenRead(reason string) ([]byte, error) {
 	if err := g.Fix(); err != nil {
 		return nil, err
 	}
-	g.file = nil
+	g.rfile = nil
 	if err := g.readToIndex(g.lastReadIndex); err != nil {
 		return nil, err
 	}
@@ -516,7 +538,7 @@ func (g *Gian) readToIndex(toindex int) error {
 	if toindex == 0 {
 		return nil
 	}
-	if g.file == nil {
+	if g.rfile == nil {
 		if err := g.openFile(); err != nil {
 			return err
 		}
@@ -602,14 +624,14 @@ func (g *Gian) ReadAll() ([]byte, error) {
 }
 
 func (g *Gian) Reset() {
-	if g.file != nil {
-		g.file.Close()
-		g.file = nil
+	if g.rfile != nil {
+		g.rfile.Close()
+		g.rfile = nil
 	}
 }
 
 func (g *Gian) Read() ([]byte, error) {
-	if g.file == nil {
+	if g.rfile == nil {
 		if err := g.openFile(); err != nil {
 			return nil, err
 		}
@@ -628,7 +650,7 @@ func (g *Gian) Read() ([]byte, error) {
 			if err := g.Fix(); err != nil {
 				return nil, err
 			}
-			g.file = nil
+			g.rfile = nil
 			return g.Read()
 		}
 

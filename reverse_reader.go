@@ -9,7 +9,7 @@ import (
 // RReader implements buffering for an io.Reader object.
 type RReader struct {
 	buf     []byte
-	file    *os.File // reader provided by the client
+	file    io.ReadSeeker // reader provided by the client
 	r       int      // buf readable region [0, r)
 	filecur int64    // current position of the file
 	err     error
@@ -18,7 +18,7 @@ type RReader struct {
 // NewReaderSize returns a new [Reader] whose buffer has at least the specified
 // size. If the argument io.Reader is already a [Reader] with large enough
 // size, it returns the underlying [Reader].
-func NewRReaderSize(file *os.File, size int) *RReader {
+func NewRReaderSize(file io.ReadSeeker, size int) *RReader {
 	if size <= 0 {
 		size = 4096
 	}

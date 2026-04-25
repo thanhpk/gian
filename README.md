@@ -2,9 +2,11 @@
 ![Logo](logo.jpg?raw=true "Gian")
 
 A file format that
-* hard to kill *(on bit rot harddrive)*
+* hard to kill *(on bit rot hard-drive)*
 * auto healing
 
+Downside:
+* append only
 
 ### Usage
 ``` go
