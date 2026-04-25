@@ -18,23 +18,23 @@ type RReader struct {
 // NewReaderSize returns a new [Reader] whose buffer has at least the specified
 // size. If the argument io.Reader is already a [Reader] with large enough
 // size, it returns the underlying [Reader].
-func NewRReaderSize(file io.ReadSeeker, size int) *RReader {
+func NewRReaderSize(file io.ReadSeeker, size int) (*RReader, error) {
 	if size <= 0 {
 		size = 4096
 	}
 	n, err := file.Seek(0, io.SeekEnd)
 	if err != nil {
-		panic(err)
+		return nil, err
 	}
 	return &RReader{
 		filecur: n,
 		buf:     make([]byte, size),
 		file:    file,
-	}
+	}, nil
 }
 
 // NewReader returns a new [Reader] whose buffer has the default size.
-func NewRReader(file *os.File) *RReader {
+func NewRReader(file *os.File) (*RReader, error) {
 	return NewRReaderSize(file, 4096)
 }
 

@@ -12,11 +12,12 @@ import (
 )
 
 func TestLayout(t *testing.T) {
-	file, _ := os.CreateTemp("", "*.dat")
+	file, _ := os.CreateTemp("", "gian_layout_*.dat")
 	filename := file.Name()
 	defer os.Remove(file.Name())
 	defer os.Remove(filename + ".bak")
 	gian := New(filename)
+	defer gian.Close()
 	gian.Write([]byte("hello"))
 	gian.ForceCommit()
 	gian.Write([]byte("goodbye"))
@@ -43,18 +44,19 @@ func TestLayout(t *testing.T) {
 	if !bytes.Equal(dat, mustbe) {
 		t.Errorf("SHOULDBEEQ, %v, %v, \n%x\n%x", len(dat), len(mustbe), dat, mustbe)
 	}
-	if _, _, err := ReadFromStart(filename, false); err != nil {
+	if _, err := ReadFromStart(filename, nil); err != nil {
 		t.Errorf("MUST BE TRUE %v", err)
 	}
 }
 
 func TestReadFromUncommit(t *testing.T) {
-	file, _ := os.CreateTemp("/tmp", "gian_*.dat")
+	file, _ := os.CreateTemp("", "gian_uncommit_*.dat")
 	filename := file.Name()
 	defer os.Remove(filename)
 	defer os.Remove(filename + ".bak")
 
 	gian := New(filename)
+	defer gian.Close()
 	const N = 10
 	b := [4]byte{}
 	for i := range N {
@@ -79,12 +81,13 @@ func TestReadFromUncommit(t *testing.T) {
 }
 
 func TestReadAll(t *testing.T) {
-	file, _ := os.CreateTemp("/tmp", "gian_*.dat")
+	file, _ := os.CreateTemp("", "gian_readall_*.dat")
 	filename := file.Name()
 	defer os.Remove(filename)
 	defer os.Remove(filename + ".bak")
 
 	gian := New(filename)
+	defer gian.Close()
 	all := []byte{}
 	const N = 10
 	b := [4]byte{}
@@ -110,7 +113,7 @@ func TestReadAll(t *testing.T) {
 }
 
 func TestDetectCorrupt(t *testing.T) {
-	file, _ := os.CreateTemp("/tmp", "gian_*.dat")
+	file, _ := os.CreateTemp("", "gian_corrupt_*.dat")
 	filename := file.Name()
 	defer os.Remove(filename)
 	defer os.Remove(filename + ".bak")
@@ -133,13 +136,14 @@ func TestDetectCorrupt(t *testing.T) {
 	}
 
 	gian = New(filename)
+	defer gian.Close()
 	if _, err := gian.Read(); err != nil {
 		t.Errorf("MUST BE NO ERR")
 	}
 }
 
 func TestReadOne(t *testing.T) {
-	file, _ := os.CreateTemp("/tmp", "gian_*.dat")
+	file, _ := os.CreateTemp("", "gian_readone_*.dat")
 	filename := file.Name()
 	defer os.Remove(filename)
 	defer os.Remove(filename + ".bak")
@@ -152,8 +156,10 @@ func TestReadOne(t *testing.T) {
 	gian.Close()
 
 	gian = New(filename)
+	defer gian.Close()
 	out, err := gian.Read()
 	if err != nil {
+		t.Error(err)
 		return
 	}
 
@@ -162,18 +168,19 @@ func TestReadOne(t *testing.T) {
 		t.Errorf("SHOULDEQ, got %d, want %d", num2, num)
 	}
 
-	if _, _, err := ReadFromStart(filename, false); err != nil {
+	if _, err := ReadFromStart(filename, nil); err != nil {
 		t.Errorf("MUST BE TRUE %v", err)
 	}
 }
 
 func TestReadWriteManySmallx(t *testing.T) {
-	file, _ := os.CreateTemp("", "*.dat")
+	file, _ := os.CreateTemp("", "gian_many_small_*.dat")
 	filename := file.Name()
 	defer os.Remove(filename)
 	defer os.Remove(filename + ".bak")
 
 	gian := New(file.Name())
+	defer gian.Close()
 	const N = 1000
 	b := [4]byte{}
 	for i := range N {
@@ -194,13 +201,13 @@ func TestReadWriteManySmallx(t *testing.T) {
 		}
 	}
 
-	if _, _, err := ReadFromStart(filename, false); err != nil {
+	if _, err := ReadFromStart(filename, nil); err != nil {
 		t.Errorf("MUST BE TRUE %v", err)
 	}
 }
 
 func TestReadFromBrokenFileMissing(t *testing.T) {
-	file, _ := os.CreateTemp("", "*.dat")
+	file, _ := os.CreateTemp("", "gian_broken_missing_*.dat")
 	filename := file.Name()
 	defer os.Remove(filename)
 	defer os.Remove(filename + ".bak")
@@ -216,6 +223,7 @@ func TestReadFromBrokenFileMissing(t *testing.T) {
 	}
 
 	os.Remove(filename) // remove file
+	defer gian.Close()
 	for i := range N {
 		b, err := gian.Read()
 		if err != nil {
@@ -230,7 +238,7 @@ func TestReadFromBrokenFileMissing(t *testing.T) {
 }
 
 func TestReadFromBrokenFile(t *testing.T) {
-	file, _ := os.CreateTemp("", "*.dat")
+	file, _ := os.CreateTemp("", "gian_broken_*.dat")
 	filename := file.Name()
 	defer os.Remove(filename)
 	defer os.Remove(filename + ".bak")
@@ -244,30 +252,35 @@ func TestReadFromBrokenFile(t *testing.T) {
 		gian.Write(b[:])
 		gian.ForceCommit()
 	}
+	gian.Close()
 
 	for r := range 100 {
 		messUpFile(filename)
-		gian = New(filename)
+		g := New(filename)
 		for i := 0; i < N; i++ {
-			b, err := gian.Read()
+			b, err := g.Read()
 			if err != nil {
+				g.Close()
 				t.Errorf("RUN %d, ERR %d %v", r, i, err)
 				return
 			}
 			readi := binary.BigEndian.Uint32(b[:])
 			if int(readi) != N-i-1 {
+				g.Close()
 				t.Errorf("SHOULDEQ RUN %d, got %d, want %d", r, readi, N-i-1)
 			}
 		}
+		g.Close()
 	}
 }
 
 func TestReadWriteManySmallCommit(t *testing.T) {
-	file, _ := os.CreateTemp("", "*.dat")
+	file, _ := os.CreateTemp("", "gian_many_small_commit_*.dat")
 	defer os.Remove(file.Name())
 	defer os.Remove(file.Name() + ".bak")
 
 	gian := New(file.Name())
+	defer gian.Close()
 	const N = 100000
 	for i := range N {
 		b := [4]byte{}
@@ -296,17 +309,18 @@ func TestReadWriteManySmallCommit(t *testing.T) {
 		}
 	}
 
-	if _, _, err := ReadFromStart(file.Name(), false); err != nil {
+	if _, err := ReadFromStart(file.Name(), nil); err != nil {
 		t.Errorf("MUST BE TRUE %v", err)
 	}
 }
 
 func TestReadWriteBig(t *testing.T) {
-	file, _ := os.CreateTemp("", "*.dat")
+	file, _ := os.CreateTemp("", "gian_big_*.dat")
 	defer os.Remove(file.Name())
 	defer os.Remove(file.Name() + ".bak")
 
 	gian := New(file.Name())
+	defer gian.Close()
 	big := []byte{}
 	N := 100000
 	for i := range N {
@@ -348,17 +362,18 @@ func TestReadWriteBig(t *testing.T) {
 		}
 	}
 
-	if _, _, err := ReadFromStart(file.Name(), false); err != nil {
+	if _, err := ReadFromStart(file.Name(), nil); err != nil {
 		t.Errorf("MUST BE TRUE %v", err)
 	}
 }
 
 func TestReadWriteSmallBigMix(t *testing.T) {
-	file, _ := os.CreateTemp("", "*.dat")
+	file, _ := os.CreateTemp("", "gian_small_big_mix_*.dat")
 	defer os.Remove(file.Name())
 	defer os.Remove(file.Name() + ".bak")
 
 	gian := New(file.Name())
+	defer gian.Close()
 	const N = 100000
 	for i := range N {
 		b := [4]byte{}
@@ -402,7 +417,7 @@ func TestReadWriteSmallBigMix(t *testing.T) {
 			t.Errorf("SHOULDEQ, got %d, want %d", i32, i)
 		}
 	}
-	if _, _, err := ReadFromStart(file.Name(), false); err != nil {
+	if _, err := ReadFromStart(file.Name(), nil); err != nil {
 		t.Errorf("MUST BE TRUE %v", err)
 	}
 }
@@ -531,7 +546,7 @@ func appendRandom(filename string, length int) {
 }
 
 func TestHealingFromBackup(t *testing.T) {
-	file, _ := os.CreateTemp("", "*.dat")
+	file, _ := os.CreateTemp("", "gian_healing_backup_*.dat")
 	filename := file.Name()
 	defer os.Remove(filename)
 	defer os.Remove(filename + ".bak")
@@ -555,6 +570,7 @@ func TestHealingFromBackup(t *testing.T) {
 	gian.Close()
 
 	gian = New(filename)
+	defer gian.Close()
 	N = 100_000
 	for i := range N {
 		b := [4]byte{}
@@ -600,11 +616,12 @@ func TestHealingFromBackup(t *testing.T) {
 }
 
 func TestHealingBackup(t *testing.T) {
-	file, _ := os.CreateTemp("", "*.dat")
+	file, _ := os.CreateTemp("", "gian_healing_bak_*.dat")
 	filename := file.Name()
 	defer os.Remove(filename)
 	defer os.Remove(filename + ".bak")
 	gian := New(filename)
+	defer gian.Close()
 	N := 10000
 	for i := range N {
 		b := [4]byte{}
@@ -652,7 +669,7 @@ func TestHealingBackup(t *testing.T) {
 }
 
 func TestWriteToBrokenFile(t *testing.T) {
-	file, _ := os.CreateTemp("", "*.dat")
+	file, _ := os.CreateTemp("", "gian_broken_file_write_*.dat")
 	defer os.Remove(file.Name())
 	defer os.Remove(file.Name() + ".bak")
 
@@ -667,6 +684,7 @@ func TestWriteToBrokenFile(t *testing.T) {
 	gian.Close()
 	appendRandom(file.Name(), 10000)
 	gian = New(file.Name())
+	defer gian.Close()
 	b := [4]byte{}
 	binary.BigEndian.PutUint32(b[:], uint32(N))
 	gian.Write(b[:])
@@ -699,13 +717,13 @@ func TestWriteToBrokenFile(t *testing.T) {
 		}
 	}
 
-	if _, _, err := ReadFromStart(file.Name(), false); err != nil {
+	if _, err := ReadFromStart(file.Name(), nil); err != nil {
 		t.Errorf("MUST BE TRUE %v", err)
 	}
 }
 
 func TestWriteToBrokenBackup(t *testing.T) {
-	file, _ := os.CreateTemp("", "*.dat")
+	file, _ := os.CreateTemp("", "gian_broken_bak_write_*.dat")
 	defer os.Remove(file.Name())
 	defer os.Remove(file.Name() + ".bak")
 
@@ -721,6 +739,7 @@ func TestWriteToBrokenBackup(t *testing.T) {
 	appendRandom(file.Name()+".bak", 10000)
 
 	gian = New(file.Name())
+	defer gian.Close()
 	b := [4]byte{}
 	binary.BigEndian.PutUint32(b[:], uint32(N))
 	gian.Write(b[:])
@@ -757,19 +776,22 @@ func TestWriteToBrokenBackup(t *testing.T) {
 		}
 	}
 
-	if _, _, err := ReadFromStart(file.Name(), false); err != nil {
+	if _, err := ReadFromStart(file.Name(), nil); err != nil {
 		t.Errorf("MUST BE TRUE %v", err)
 	}
 }
 
 func TestLoadForward(t *testing.T) {
-	file, _ := os.CreateTemp("", "*.dat")
+	file, _ := os.CreateTemp("", "gian_load_fwd_*.dat")
 	filename := file.Name()
 	defer os.Remove(filename)
 	defer os.Remove(filename + ".bak")
 	gian := New(filename)
+	defer gian.Close()
 
-	index, data, _ := ReadFromStart(filename, true)
+	buf := &bytes.Buffer{}
+	index, _ := ReadFromStart(filename, buf)
+	data := buf.Bytes()
 	if index != 0 || len(data) != 0 {
 		t.Errorf("SHOULD BE 0")
 	}
@@ -788,7 +810,9 @@ func TestLoadForward(t *testing.T) {
 	}
 
 	appendRandom(filename, 100)
-	index, data, _ = ReadFromStart(filename, true)
+	buf.Reset()
+	index, _ = ReadFromStart(filename, buf)
+	data = buf.Bytes()
 	if !bytes.Equal(originb, data) {
 		t.Errorf("SHOULD EQ.\n%x\n%x", originb, data)
 	}
@@ -799,13 +823,16 @@ func TestLoadForward(t *testing.T) {
 }
 
 func TestLoadBackward(t *testing.T) {
-	file, _ := os.CreateTemp("", "*.dat")
+	file, _ := os.CreateTemp("", "gian_load_bwd_*.dat")
 	filename := file.Name()
 	defer os.Remove(filename)
 	defer os.Remove(filename + ".bak")
 	gian := New(filename)
+	defer gian.Close()
 
-	pass, data := LoadBackwardToIndex(filename, 0)
+	buf := &bytes.Buffer{}
+	pass, _ := LoadBackwardToIndex(filename, 0, buf)
+	data := buf.Bytes()
 	if pass == false {
 		t.Errorf("SHOULD BE TRUE")
 	}
@@ -823,12 +850,14 @@ func TestLoadBackward(t *testing.T) {
 	}
 	gian.Close()
 
-	pass, _ = LoadBackwardToIndex(filename, 0)
+	pass, _ = LoadBackwardToIndex(filename, 0, nil)
 	if !pass {
 		t.Errorf("SHOULD BE TRUE")
 	}
 
-	pass, data = LoadBackwardToIndex(filename, N)
+	buf.Reset()
+	pass, _ = LoadBackwardToIndex(filename, N, buf)
+	data = buf.Bytes()
 	if !pass {
 		t.Errorf("SHOULD BE TRUE")
 	}
@@ -844,12 +873,12 @@ func TestLoadBackward(t *testing.T) {
 	}
 
 	cutFileHead(filename, 2)
-	pass, _ = LoadBackwardToIndex(filename, 1)
+	pass, _ = LoadBackwardToIndex(filename, 1, nil)
 	if !pass {
 		t.Errorf("SHOULD BE TRUE")
 	}
 
-	pass, _ = LoadBackwardToIndex(filename, 0)
+	pass, _ = LoadBackwardToIndex(filename, 0, nil)
 	if pass {
 		t.Errorf("SHOULD BE FALSE")
 	}
@@ -877,7 +906,9 @@ func TestLoadBackward(t *testing.T) {
 		0x6d, 0x34, 0x85, 0x3c,
 	}
 
-	pass, data = LoadBackwardToIndex(filename, 1)
+	buf.Reset()
+	pass, _ = LoadBackwardToIndex(filename, 1, buf)
+	data = buf.Bytes()
 	if !pass {
 		t.Errorf("SHOULD BE TRUE")
 	}
@@ -885,22 +916,10 @@ func TestLoadBackward(t *testing.T) {
 	if !bytes.Equal(data, expect) {
 		t.Errorf("SHOULD EQ\n%x\n%x\n%x", data, expect, originb[24:])
 	}
-
-	return
-	gian = New(filename)
-	N = 1
-	binary.BigEndian.PutUint32(b[:], 113)
-	gian.Write(b[:])
-	gian.Close()
-
-	pass, data = LoadBackwardToIndex(filename, 1)
-	if !pass {
-		t.Errorf("SHOULD BE TRUE")
-	}
 }
 
 func TestHealingBothMainAndBackup(t *testing.T) {
-	file, _ := os.CreateTemp("", "*.dat")
+	file, _ := os.CreateTemp("", "gian_healing_both_*.dat")
 	filename := file.Name()
 	defer os.Remove(filename)
 	defer os.Remove(filename + ".bak")
@@ -916,13 +935,15 @@ func TestHealingBothMainAndBackup(t *testing.T) {
 	cutFileHead(filename, 40)
 	cutFileTail(filename+".bak", 10)
 	if err := gian.Fix(); err != nil {
+		gian.Close()
 		panic(err)
 	}
 
 	if checkSumFile(filename) != checkSumFile(filename+".bak") {
 		t.Errorf("MUST HEAL")
 	}
-
+	gian.Close()
+	gian = New(filename)
 	cutFileHead(filename+".bak", 40)
 	cutFileTail(filename, 50)
 
@@ -933,10 +954,10 @@ func TestHealingBothMainAndBackup(t *testing.T) {
 	if checkSumFile(filename) != checkSumFile(filename+".bak") {
 		t.Errorf("MUST HEAL")
 	}
-
 	cutFileHead(filename+".bak", 40)
 	cutFileHead(filename, 50)
 	if err := gian.Fix(); err == nil {
 		t.Errorf("SHOULD BE ERR")
 	}
+	gian.Close()
 }

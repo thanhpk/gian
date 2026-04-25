@@ -8,17 +8,21 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/thanhpk/vdisk"
 )
 
-var CHUNKSIZE = 4096 // 4kb
+const DEFAULT_CHUNKSIZE = 4096 // 4kb
 const ONEGB = 1 * 1024 * 1024 * 1024
 
 // self healing file
 type Gian struct {
-	dead     bool
+	mu       sync.Mutex
+	stopOnce sync.Once
+	stopChan chan struct{}
+
 	filename string
 
 	// writing
@@ -26,6 +30,7 @@ type Gian struct {
 	lastWriteIndex int
 	loaded         bool
 
+	chunkSize      int
 	uncommitLength int
 	uncommitBuffer []byte
 
@@ -44,15 +49,17 @@ type Gian struct {
 
 func New(filename string) *Gian {
 	if filename == "" {
-		file, _ := os.CreateTemp("/tmp", "*.dat")
+		file, _ := os.CreateTemp("", "gian_*.dat")
 		filename = file.Name()
 	}
 
 	me := &Gian{
 		filename:       filename,
-		uncommitBuffer: make([]byte, CHUNKSIZE),
-		readBuffer:     make([]byte, CHUNKSIZE),
+		chunkSize:      DEFAULT_CHUNKSIZE,
+		uncommitBuffer: make([]byte, DEFAULT_CHUNKSIZE),
+		readBuffer:     make([]byte, DEFAULT_CHUNKSIZE),
 		limitReadMbs:   100_000, //  ~ 100Gbs/s -> no limit
+		stopChan:       make(chan struct{}),
 	}
 	go me.autoCommit()
 	return me
@@ -71,23 +78,38 @@ func (g *Gian) GetFileName() string {
 }
 
 func (g *Gian) Close() error {
-	err := g.ForceCommit()
+	g.stopOnce.Do(func() {
+		close(g.stopChan)
+	})
+
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	err := g.forceCommit()
 	if g.rfile != nil {
 		g.rfile.Close()
 	}
-	g.dead = true
+	if g.wfile != nil {
+		g.wfile.Close()
+	}
+	if g.wbakfile != nil {
+		g.wbakfile.Close()
+	}
 	return err
 }
 
 func (g *Gian) Write(data []byte) error {
-	if g.uncommitLength > 0 && len(data)+g.uncommitLength > CHUNKSIZE {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	if g.uncommitLength > 0 && len(data)+g.uncommitLength > g.chunkSize {
 		if err := g.commit(g.uncommitBuffer[:g.uncommitLength]); err != nil {
 			return err
 		}
 		g.uncommitLength = 0
 	}
 
-	if len(data) > CHUNKSIZE {
+	if len(data) > g.chunkSize {
 		return g.commit(data)
 	}
 	copy(g.uncommitBuffer[g.uncommitLength:g.uncommitLength+len(data)], data)
@@ -96,70 +118,96 @@ func (g *Gian) Write(data []byte) error {
 }
 
 func (g *Gian) Fix() error {
-	findex, _, fileErr := ReadFromStart(g.filename, false)
-	bindex, _, bakFileErr := ReadFromStart(g.filename+".bak", false)
-	if findex == bindex && fileErr == nil && bakFileErr == nil {
-		return nil
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.fix()
+}
+
+func (g *Gian) fix() error {
+	if g.wfile != nil {
+		g.wfile.Close()
+		g.wfile = nil
+	}
+	if g.wbakfile != nil {
+		g.wbakfile.Close()
+		g.wbakfile = nil
+	}
+	if g.rfile != nil {
+		g.rfile.Close()
+		g.rfile = nil
 	}
 
-	if findex != bindex && fileErr == nil && bakFileErr == nil {
-		if findex < bindex {
-			return CopyFile(g.filename, g.filename+".bak")
-		}
-		return CopyFile(g.filename+".bak", g.filename)
-	}
-	headIndex, headdata, _ := ReadFromStart(g.filename, true)
-	bakheadIndex, bakheaddata, _ := ReadFromStart(g.filename+".bak", true)
-	if headIndex < bakheadIndex {
-		headIndex = bakheadIndex
-		headdata = bakheaddata
-	}
+	findex, _ := ReadFromStart(g.filename, nil)
+	bindex, _ := ReadFromStart(g.filename+".bak", nil)
 
-	pass, taildata := LoadBackwardToIndex(g.filename, headIndex)
-	if !pass {
-		pass, taildata = LoadBackwardToIndex(g.filename+".bak", headIndex)
-	}
-	if !pass {
-		return errors.New("cannot fix. " + g.filename)
-	}
+	// Even if findex == bindex, we might need to truncate junk at the end
+	// of both files to ensure Read() doesn't keep hitting it.
 
-	fixed := append(headdata, taildata...)
-	if err := os.WriteFile(g.filename, fixed, 0644); err != nil {
+	tmpFile, err := os.CreateTemp("", "gian_fix_*.tmp")
+	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(g.filename+".bak", fixed, 0644); err != nil {
+	defer os.Remove(tmpFile.Name())
+	defer tmpFile.Close()
+
+	headIndex := findex
+	headFile := g.filename
+	if bindex > findex {
+		headIndex = bindex
+		headFile = g.filename + ".bak"
+	}
+
+	// Copy the healthy head
+	if _, err := ReadFromStart(headFile, tmpFile); err != nil {
+		// It's okay if it hits corruption, we just want the healthy part
+	}
+
+	// Try to find a tail from either file that connects to this head
+	pass, _ := LoadBackwardToIndex(g.filename, headIndex, tmpFile)
+	if !pass {
+		pass, _ = LoadBackwardToIndex(g.filename+".bak", headIndex, tmpFile)
+	}
+
+	if headIndex == 0 && !pass {
+		return errors.New("cannot fix: both files corrupted from the start")
+	}
+
+	if err := tmpFile.Sync(); err != nil {
 		return err
 	}
 
-	findex, _, fileErr = ReadFromStart(g.filename, false)
-	bindex, _, bakFileErr = ReadFromStart(g.filename+".bak", false)
-	if findex == bindex && fileErr == nil && bakFileErr == nil {
-		return nil
+	// Overwrite both files with the fixed content
+	if err := CopyFile(g.filename, tmpFile.Name()); err != nil {
+		return err
+	}
+	if err := CopyFile(g.filename+".bak", tmpFile.Name()); err != nil {
+		return err
 	}
 
-	if findex != bindex && fileErr == nil && bakFileErr == nil {
-		if findex > bindex {
-			return CopyFile(g.filename, g.filename+".bak")
-		}
-		return CopyFile(g.filename+".bak", g.filename)
-	}
-
-	return errors.New("cannot fix.." + g.filename)
+	return nil
 }
 
 func (g *Gian) autoCommit() {
-	time.Sleep(30 * time.Second)
-	for !g.dead {
-		time.Sleep(30 * time.Second)
-		if g.uncommitLength > 0 {
-			g.ForceCommit()
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			g.mu.Lock()
+			if g.uncommitLength > 0 {
+				g.forceCommit()
+			}
+			g.mu.Unlock()
+		case <-g.stopChan:
+			return
 		}
 	}
 }
 
 func mustInsync(f1, f2 string) error {
-	i1, _, err1 := ReadFromStart(f1, false)
-	i2, _, err2 := ReadFromStart(f2, false)
+	i1, err1 := ReadFromStart(f1, nil)
+	i2, err2 := ReadFromStart(f2, nil)
 
 	if err1 != nil {
 		if i2 == 0 {
@@ -194,7 +242,7 @@ func (g *Gian) commit(data []byte) error {
 		makeSurePath(g.filename)
 
 		if err := mustInsync(g.filename, g.filename+".bak"); err != nil {
-			if err := g.Fix(); err != nil {
+			if err := g.fix(); err != nil {
 				return err
 			}
 		}
@@ -203,7 +251,10 @@ func (g *Gian) commit(data []byte) error {
 		if err == nil {
 			defer file.Close()
 			b4 := [4]byte{}
-			rr := NewRReaderSize(file, 1024)
+			rr, err := NewRReaderSize(file, 1024)
+			if err != nil {
+				return err
+			}
 			n, err := rr.Read(b4[:])
 			if err != nil && err != io.EOF {
 				return err
@@ -281,30 +332,34 @@ func (g *Gian) commit(data []byte) error {
 	checksumB := [4]byte{}
 	binary.BigEndian.PutUint32(checksumB[:], checksum)
 
+	// Aggregated write for better performance
+	buf := make([]byte, 0, 8+4+len(data)+4+4)
+	buf = append(buf, indexB[:]...)
+	buf = append(buf, lengthB[:]...)
+	buf = append(buf, data...)
+	buf = append(buf, lengthB[:]...)
+	buf = append(buf, checksumB[:]...)
+
 	// [ N ] [ Length ] [ --- data ---- ] [ Length ] [ CHECKSUM ]
-	g.wfile.Write(indexB[:])
-	g.wbakfile.Write(indexB[:])
-
-	g.wfile.Write(lengthB[:])
-	g.wbakfile.Write(lengthB[:])
-
-	g.wfile.Write(data[:])
-	g.wbakfile.Write(data[:])
-
-	g.wfile.Write(lengthB[:])
-	g.wbakfile.Write(lengthB[:])
-
-	g.wfile.Write(checksumB[:])
-	g.wbakfile.Write(checksumB[:])
+	if _, err := g.wfile.Write(buf); err != nil {
+		return err
+	}
+	if _, err := g.wbakfile.Write(buf); err != nil {
+		return err
+	}
 
 	g.lastWriteIndex++
 	g.lastCheckSum = checksum
-	// file.Close()
-	// bakfile.Close()
 	return nil
 }
 
 func (g *Gian) ForceCommit() error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.forceCommit()
+}
+
+func (g *Gian) forceCommit() error {
 	if g.uncommitLength == 0 {
 		return nil // no op
 	}
@@ -318,32 +373,38 @@ func (g *Gian) ForceCommit() error {
 func (g *Gian) openFile() error {
 	makeSurePath(g.filename)
 	f, err := vdisk.NewLimiter(g.limitReadMbs).OpenFile(g.filename, os.O_RDONLY|os.O_CREATE, 0644)
-	if err != nil && !os.IsNotExist(err) {
+	if err != nil {
 		return err
 	}
 
+	rr, err := NewRReaderSize(f, g.chunkSize)
+	if err != nil {
+		f.Close()
+		return err
+	}
 	g.rfile = f
-	g.rr = NewRReaderSize(f, CHUNKSIZE)
+	g.rr = rr
 	return nil
 }
 
 func (g *Gian) fixThenRead(reason string) ([]byte, error) {
-	if err := g.Fix(); err != nil {
+	if err := g.fix(); err != nil {
 		return nil, err
 	}
-	g.rfile = nil
+	if g.rfile != nil {
+		g.rfile.Close()
+		g.rfile = nil
+	}
 	if err := g.readToIndex(g.lastReadIndex); err != nil {
 		return nil, err
 	}
-	return g.Read()
+	return g.read()
 }
 
-func ReadFromStart(filename string, readdata bool) (int, []byte, error) {
-	// makeSurePath(filename)
-	out := []byte{}
+func ReadFromStart(filename string, writer io.Writer) (int, error) {
 	file, err := os.OpenFile(filename, os.O_RDONLY, 0644)
 	if err != nil {
-		return 0, nil, err
+		return 0, err
 	}
 	defer file.Close()
 	lastIndex := 0
@@ -360,23 +421,23 @@ func ReadFromStart(filename string, readdata bool) (int, []byte, error) {
 			break
 		}
 		if err != nil {
-			return lastIndex, out, err
+			return lastIndex, err
 		}
 		crc.Write(lastChecksumB[:])
 		crc.Write(indexb[:])
 		index := int(binary.BigEndian.Uint64(indexb[:]))
 
 		if index != lastIndex+1 {
-			return lastIndex, out, errors.New("wrong index 234908234")
+			return lastIndex, errors.New("wrong index")
 		}
 		if _, err := file.Read(lenb[:]); err != nil {
-			return lastIndex, out, err
+			return lastIndex, err
 		}
 		crc.Write(lenb[:])
 
 		l := binary.BigEndian.Uint32(lenb[:])
 		if l > ONEGB { // 1GB {
-			return lastIndex, out, errors.New("wrong length 3")
+			return lastIndex, errors.New("wrong length 3")
 		}
 
 		if int(l) > len(data) {
@@ -384,53 +445,56 @@ func ReadFromStart(filename string, readdata bool) (int, []byte, error) {
 		}
 		n, err := file.Read(data[:l])
 		if err != nil {
-			return lastIndex, out, err
+			return lastIndex, err
 		}
 		if n != int(l) {
-			return lastIndex, out, err
+			return lastIndex, io.ErrUnexpectedEOF
 		}
 
 		crc.Write(data[:l])
 		crc.Write(lenb[:])
 		if _, err := file.Read(lenb[:]); err != nil {
-			return lastIndex, out, err
+			return lastIndex, err
 		}
 		l2 := binary.BigEndian.Uint32(lenb[:])
-		if l2 != l { // 1GB {
-			return lastIndex, out, errors.New("wrong len")
+		if l2 != l {
+			return lastIndex, errors.New("wrong len")
 		}
 
 		if _, err := file.Read(checksumb[:]); err != nil {
-			return lastIndex, out, err
+			return lastIndex, err
 		}
 
 		checksum := binary.BigEndian.Uint32(checksumb[:])
 		if checksum != crc.Sum32() {
-			return lastIndex, out, errors.New("wrong check sum")
+			return lastIndex, errors.New("wrong check sum")
 		}
 		lastIndex = index
-		if readdata {
-			out = append(out, indexb[:]...)
-			out = append(out, lenb[:]...)
-			out = append(out, data[:l]...)
-			out = append(out, lenb[:]...)
-			out = append(out, checksumb[:]...)
+		if writer != nil {
+			writer.Write(indexb[:])
+			writer.Write(lenb[:])
+			writer.Write(data[:l])
+			writer.Write(lenb[:])
+			writer.Write(checksumb[:])
 		}
 		copy(lastChecksumB[:], checksumb[:])
 	}
 
-	return lastIndex, out, nil
+	return lastIndex, nil
 }
 
 // the return data do not include headIndex
 // (headIndex...end]
-func LoadBackwardToIndex(filename string, headIndex int) (bool, []byte) {
+func LoadBackwardToIndex(filename string, headIndex int, writer io.Writer) (bool, error) {
 	file, err := os.OpenFile(filename, os.O_RDONLY, 0644)
 	if err != nil {
-		return false, nil
+		return false, err
 	}
 	defer file.Close()
-	rr := NewRReaderSize(file, 1024)
+	rr, err := NewRReaderSize(file, 1024)
+	if err != nil {
+		return false, err
+	}
 
 	readBuffer := []byte{}
 	checksumb := [4]byte{}
@@ -446,7 +510,7 @@ func LoadBackwardToIndex(filename string, headIndex int) (bool, []byte) {
 		return true, nil
 	}
 	if err != nil && err != io.EOF {
-		return false, nil
+		return false, err
 	}
 	for {
 		if _, err := rr.Read(lenb[:]); err != nil {
@@ -480,12 +544,13 @@ func LoadBackwardToIndex(filename string, headIndex int) (bool, []byte) {
 		data := readBuffer[0:l]
 
 		if index <= headIndex {
+			lastReadIndex = index
 			break
 		}
 		// do check sum
 		if index > 1 {
 			if _, err := rr.Read(prevchecksumb[:]); err != nil {
-				return false, nil
+				return false, err
 			}
 		} else {
 			prevchecksumb[0], prevchecksumb[1], prevchecksumb[2], prevchecksumb[3] = 0, 0, 0, 0
@@ -501,35 +566,38 @@ func LoadBackwardToIndex(filename string, headIndex int) (bool, []byte) {
 
 		checksum := binary.BigEndian.Uint32(checksumb[:])
 		if checksum != crc.Sum32() {
-			return false, nil
+			return false, errors.New("checksum mismatch")
 		}
 
 		if lastReadIndex != 0 {
 			if index+1 != lastReadIndex {
-				return false, nil
+				return false, errors.New("index gap")
 			}
 		}
 		lastReadIndex = int(index)
 
 		ele := []byte{}
-		ele = append([]byte{}, indexb[:]...)
+		ele = append(ele, indexb[:]...)
 		ele = append(ele, lenb[:]...)
 		ele = append(ele, data[:]...)
 		ele = append(ele, lenb[:]...)
 		ele = append(ele, checksumb[:]...)
 		out = append(out, ele)
 		copy(checksumb[:], prevchecksumb[:])
-		if lastReadIndex == headIndex {
+		if lastReadIndex == headIndex+1 {
 			break
 		}
 	}
 
 	if lastReadIndex <= headIndex+1 {
-		res := []byte{}
-		for i := len(out) - 1; i >= 0; i-- {
-			res = append(res, out[i]...)
+		if writer != nil {
+			for i := len(out) - 1; i >= 0; i-- {
+				if _, err := writer.Write(out[i]); err != nil {
+					return false, err
+				}
+			}
 		}
-		return true, res
+		return true, nil
 	}
 	return false, nil
 }
@@ -601,15 +669,19 @@ func (g *Gian) readToIndex(toindex int) error {
 }
 
 func (g *Gian) Rename(newname string) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	makeSurePath(newname)
 	os.Remove(newname)
 	return os.Rename(g.filename, newname)
 }
 
 func (g *Gian) ReadAll() ([]byte, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	out := []byte{}
 	for {
-		data, err := g.Read()
+		data, err := g.read()
 		if err == io.EOF {
 			break
 		}
@@ -624,6 +696,8 @@ func (g *Gian) ReadAll() ([]byte, error) {
 }
 
 func (g *Gian) Reset() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	if g.rfile != nil {
 		g.rfile.Close()
 		g.rfile = nil
@@ -631,6 +705,12 @@ func (g *Gian) Reset() {
 }
 
 func (g *Gian) Read() ([]byte, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.read()
+}
+
+func (g *Gian) read() ([]byte, error) {
 	if g.rfile == nil {
 		if err := g.openFile(); err != nil {
 			return nil, err
@@ -642,16 +722,23 @@ func (g *Gian) Read() ([]byte, error) {
 		if err != nil && !os.IsNotExist(err) {
 			return nil, err
 		}
-		bakrr := NewRReaderSize(bakf, CHUNKSIZE)
+		defer bakf.Close()
+		bakrr, err := NewRReaderSize(bakf, g.chunkSize)
+		if err != nil {
+			return nil, err
+		}
 		// read first checksum
 		bakcsb := [4]byte{}
 		bakrr.Read(bakcsb[:])
 		if !bytes.Equal(bakcsb[:], g.lastReadCheckSumB[:]) {
-			if err := g.Fix(); err != nil {
+			if g.rfile != nil {
+				g.rfile.Close()
+				g.rfile = nil
+			}
+			if err := g.fix(); err != nil {
 				return nil, err
 			}
-			g.rfile = nil
-			return g.Read()
+			return g.read()
 		}
 
 		if g.uncommitLength > 0 {
@@ -687,7 +774,6 @@ func (g *Gian) Read() ([]byte, error) {
 	l2 := binary.BigEndian.Uint32(lenb[:])
 	if l2 != l {
 		return g.fixThenRead("wrong len2")
-		//		return nil, errors.New("wrong length, broken file")
 	}
 
 	indexb := [8]byte{}
@@ -701,8 +787,6 @@ func (g *Gian) Read() ([]byte, error) {
 		// do extra read must be eof
 		onebyte := []byte{0}
 		if n, _ := g.rr.Read(onebyte[:]); n != 0 {
-			// has extra byte in the begging of the file
-			// return nil, errors.New("begining corrupted")
 			return g.fixThenRead("no extra byte")
 		}
 		return data, nil
@@ -727,8 +811,7 @@ func (g *Gian) Read() ([]byte, error) {
 	}
 	g.lastReadCheckSumB = prevchecksumb
 
-	if g.lastReadIndex == 0 {
-	} else {
+	if g.lastReadIndex != 0 {
 		if index+1 != g.lastReadIndex {
 			return g.fixThenRead("wrong index")
 		}
@@ -738,7 +821,7 @@ func (g *Gian) Read() ([]byte, error) {
 	return data, nil
 }
 
-// copyFileContents copies the contents of the file named src to the file named
+// CopyFile copies the contents of the file named src to the file named
 // by dst. The file will be created if it does not already exist. If the
 // destination file exists, all it's contents will be replaced by the contents
 // of the source file.

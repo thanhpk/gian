@@ -37,7 +37,10 @@ func TestRReader(t *testing.T) {
 					panic(err)
 				}
 
-				reader := NewRReaderSize(f, buffersize)
+				reader, err := NewRReaderSize(f, buffersize)
+				if err != nil {
+					t.Fatal(err)
+				}
 				var b = make([]byte, byteread)
 				content := ""
 				for {
